@@ -96,7 +96,9 @@ def required_cap(uri):
     for base, cap in _RULES:
         if p.startswith(base):
             return cap
-    return "sesion"
+    # cualquier ruta no mapeada = el panel nativo uhppoted (location / en nginx)
+    # -> exige ver_panel, no "sesion", para que no lo vea cualquier logueado.
+    return "ver_panel"
 
 
 CAPS = [
@@ -107,6 +109,7 @@ CAPS = [
     ("publicar_acl", "Publicar ACL a controladores"),
     ("gestionar_controladores", "Gestionar Controladores"),
     ("abrir_puerta", "Abrir Puerta"),
+    ("ver_panel", "Ver Panel nativo (uhppoted)"),
     ("gestionar_usuarios", "Gestionar Usuarios"),
 ]
 _VALID_CAPS = {k for k, _ in CAPS} | {"*"}
