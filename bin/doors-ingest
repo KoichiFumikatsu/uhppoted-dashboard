@@ -7,6 +7,12 @@ import sys
 sys.path.insert(0, "/root/uhppoted-dashboard")
 from doors_analytics import config, db, ingest
 
+# NOTE: only json.JSONDecodeError is swallowed here — it is the transient
+# partial-read race against teq-events-poller.service, which rewrites
+# teq-events.json every 60s. Exit 0 so the systemd timer simply retries in
+# 10 min (per-source cursors make a partial/aborted cycle idempotent and
+# safe, so an early exit before conn.close() loses nothing). Any OTHER
+# exception propagates -> non-zero exit -> the unit shows in `systemctl --failed`.
 try:
     os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
     conn = sqlite3.connect(config.DB_PATH)
@@ -16,6 +22,6 @@ try:
         config.PALMETTO_SERIAL, config.TEQ_SERIALS, config.SINCE_DATE)
     conn.close()
     print("doors-ingest:", counts)
-except (json.JSONDecodeError, ValueError) as e:
-    print("doors-ingest: skipped cycle (transient read error):", e, file=sys.stderr)
+except json.JSONDecodeError as e:
+    print("doors-ingest: skipped cycle (transient partial read):", e, file=sys.stderr)
     sys.exit(0)
