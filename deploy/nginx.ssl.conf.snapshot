@@ -17,8 +17,13 @@ server {
         alias /home/azcweb/web/doors.azc.com.co/public_html/robots.txt;
     }
 
+    location @to_login { return 302 /portal/login.html; }
+    location @to_portal { return 302 /portal/; }
     # Reverse proxy a uhppoted-httpd (HTTPS interno con cert self-signed)
     location / {
+        auth_request /_auth;
+        error_page 401 = @to_login;
+        error_page 403 = @to_portal;
         proxy_pass https://127.0.0.1:8543;
         proxy_set_header Accept-Encoding "";
         proxy_ssl_verify off;
