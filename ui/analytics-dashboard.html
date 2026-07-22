@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Dashboard de accesos — AZC</title>
+<style>
+  :root{
+    --bg:#0f1720; --panel:#182430; --line:#2a3a49; --ink:#e6edf3; --mut:#9fb0c0;
+    --palmetto:#3987e5; --teq:#008300; --seq:#3987e5; --warn:#fab219;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+  header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:center}
+  header b{font-size:18px}
+  header a{color:var(--mut);text-decoration:none;font-size:13px}
+  header a:hover{color:var(--ink)}
+  .filters{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;padding:14px 20px}
+  .filters label{display:flex;flex-direction:column;font-size:12px;color:var(--mut);gap:4px}
+  .filters input,.filters select{background:var(--panel);border:1px solid var(--line);color:var(--ink);padding:7px 9px;border-radius:6px;font-size:13px}
+  button{background:var(--palmetto);color:#04121f;border:none;padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;font-size:13px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;padding:6px 20px 20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .card h3{margin:0 0 8px;font-size:12px;color:var(--mut);font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+  .tile{display:flex;justify-content:space-between;align-items:baseline;margin:6px 0}
+  .tile .lbl{font-size:13px;color:var(--mut);display:flex;align-items:center;gap:6px}
+  .tile .val{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .wide{grid-column:1/-1}
+  .legend{display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:8px}
+  .legend span{display:flex;align-items:center;gap:6px}
+  svg{width:100%;height:auto;display:block}
+  .bar-lbl{fill:var(--mut);font-size:10px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td,th{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--mut);font-weight:600}
+  .warnpill{color:var(--warn);font-weight:700}
+</style>
+</head>
+<body>
+<header>
+  <b>Dashboard de accesos</b>
+  <a href="/analytics/">‹ Eventos</a>
+</header>
+<div class="filters">
+  <label>Desde<input type="date" id="from"></label>
+  <label>Hasta<input type="date" id="to"></label>
+  <label>Sede<select id="sede"><option value="">Todas</option><option>Palmetto</option><option>Tequendama</option></select></label>
+  <label>Umbral tardanza<input type="time" id="lt" value="08:00"></label>
+  <button id="apply">Actualizar</button>
+</div>
+<div class="grid" id="grid"></div>
+<script>
+const API="/analytics/api";
+const C={Palmetto:"#3987e5",Tequendama:"#008300"};
+function d(id){return document.getElementById(id)}
+function fmt(x){return new Date(x).toISOString().slice(0,10)}
+function initDates(){ d("to").value=fmt(Date.now()); d("from").value=fmt(Date.now()-29*864e5); }
+function el(tag,attrs,txt){const e=document.createElementNS(tag==="svg"||["rect","g","text","line","polyline","circle"].includes(tag)?"http://www.w3.org/2000/svg":null,tag);for(const k in(attrs||{}))e.setAttribute(k,attrs[k]);if(txt!=null)e.textContent=txt;return e}
+function card(title,wide){const c=document.createElement("div");c.className="card"+(wide?" wide":"");const h=document.createElement("h3");h.textContent=title;c.appendChild(h);return c}
+function tile(parent,label,value,color,warn){
+  const t=document.createElement("div");t.className="tile";
+  const l=document.createElement("span");l.className="lbl";
+  if(color){const dot=document.createElement("span");dot.className="dot";dot.style.background=color;l.appendChild(dot)}
+  l.appendChild(document.createTextNode(label));
+  const v=document.createElement("span");v.className="val"+(warn?" warnpill":"");v.textContent=value;
+  t.appendChild(l);t.appendChild(v);parent.appendChild(t);
+}
+// barras verticales (magnitud, un solo tono azul)
+function barsV(data,xkey,ykey,h){
+  const W=Math.max(data.length*26,300),H=h||140,pad=24;
+  const max=Math.max(1,...data.map(r=>r[ykey]));
+  const svg=el("svg",{viewBox:`0 0 ${W} ${H}`,preserveAspectRatio:"none"});
+  const bw=(W-pad)/data.length*0.7;
+  data.forEach((r,i)=>{
+    const x=pad+i*((W-pad)/data.length), bh=(r[ykey]/max)*(H-pad-14);
+    const rect=el("rect",{x:x, y:H-pad-bh, width:bw, height:bh, rx:3, fill:"#3987e5"});
+    rect.appendChild(el("title",{},`${r[xkey]}: ${r[ykey]}`));
+    svg.appendChild(rect);
+    if(i%Math.ceil(data.length/12||1)===0) svg.appendChild(el("text",{x:x,y:H-8,class:"bar-lbl"},String(r[xkey])));
+  });
+  return svg;
+}
+// barras horizontales (top puertas)
+function barsH(data,klabel,kval){
+  const H=data.length*24+8,W=320,max=Math.max(1,...data.map(r=>r[kval]));
+  const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
+  data.forEach((r,i)=>{
+    const bw=(r[kval]/max)*(W-140);
+    svg.appendChild(el("text",{x:0,y:i*24+15,class:"bar-lbl"},String(r[klabel]).slice(0,20)));
+    const rect=el("rect",{x:130,y:i*24+4,width:Math.max(bw,1),height:14,rx:3,fill:"#3987e5"});
+    rect.appendChild(el("title",{},`${r[klabel]}: ${r[kval]}`));
+    svg.appendChild(rect);
+    svg.appendChild(el("text",{x:130+Math.max(bw,1)+5,y:i*24+15,class:"bar-lbl"},String(r[kval])));
+  });
+  return svg;
+}
+// lineas de asistencia por sede (2 categoricas)
+function linesMulti(series,sedes){
+  const W=Math.max(series.length*18,320),H=160,pad=24;
+  const allv=series.flatMap(p=>sedes.map(s=>p[s]||0));
+  const max=Math.max(1,...allv);
+  const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
+  sedes.forEach(s=>{
+    const pts=series.map((p,i)=>{
+      const x=pad+i*((W-pad)/Math.max(series.length-1,1));
+      const y=H-pad-((p[s]||0)/max)*(H-pad-10);
+      return `${x},${y}`;
+    }).join(" ");
+    svg.appendChild(el("polyline",{points:pts,fill:"none",stroke:C[s]||"#3987e5","stroke-width":2}));
+  });
+  return svg;
+}
+async function load(){
+  const p=new URLSearchParams();
+  for(const k of ["from","to","sede"]){const v=d(k).value.trim();if(v)p.set(k,v)}
+  p.set("late_threshold",d("lt").value||"08:00");
+  const k=await (await fetch(`${API}/kpis?${p}`)).json();
+  const g=d("grid");g.innerHTML="";
+  const sedes=Object.keys(k.arrival_departure);
+  // 1) Llegada/salida promedio
+  const c1=card("Llegada / salida promedio");
+  sedes.forEach(s=>{ tile(c1,`${s} — llegada`,k.arrival_departure[s].arrival||"—",C[s]);
+                     tile(c1,`${s} — salida`,k.arrival_departure[s].departure||"—",C[s]); });
+  g.appendChild(c1);
+  // 2) Asistencia (ultimo dia)
+  const c2=card("Asistencia (último día)");
+  Object.keys(k.attendance.latest).forEach(s=>tile(c2,s,k.attendance.latest[s],C[s]));
+  g.appendChild(c2);
+  // 3) Tardanzas
+  const c3=card(`Llegadas tardías (> ${k.late.threshold})`);
+  sedes.forEach(s=>{ const L=k.late[s]; if(L) tile(c3,s,`${L.late}/${L.total} (${L.pct}%)`,null,L.pct>=20); });
+  g.appendChild(c3);
+  // 4) Pico horario
+  const c4=card("Accesos por hora del día",true);
+  c4.appendChild(barsV(k.hourly,"hour","count",150));
+  g.appendChild(c4);
+  // 5) Volumen diario
+  const c5=card("Volumen diario",true);
+  c5.appendChild(barsV(k.daily_volume,"date","count",150));
+  g.appendChild(c5);
+  // 6) Asistencia por sede (lineas)
+  if(k.attendance.series.length){
+    const c6=card("Asistencia por día y sede",true);
+    const leg=document.createElement("div");leg.className="legend";
+    sedes.forEach(s=>{leg.innerHTML+=`<span><span class="dot" style="background:${C[s]}"></span>${s}</span>`});
+    c6.appendChild(leg);
+    c6.appendChild(linesMulti(k.attendance.series,sedes));
+    g.appendChild(c6);
+  }
+  // 7) Top puertas
+  const c7=card("Puertas más usadas");
+  c7.appendChild(barsH(k.top_doors,"door","count"));
+  g.appendChild(c7);
+  // 8) Top tarjetas
+  const c8=card("Tarjetas más activas");
+  const tb=document.createElement("table");
+  tb.innerHTML="<tr><th>Tarjeta</th><th>Nombre</th><th>Accesos</th></tr>";
+  k.top_cards.forEach(r=>{const tr=document.createElement("tr");
+    [r.card,r.name||"",r.count].forEach(v=>{const td=document.createElement("td");td.textContent=v;tr.appendChild(td)});
+    tb.appendChild(tr)});
+  c8.appendChild(tb);g.appendChild(c8);
+}
+d("apply").onclick=load;
+initDates();load();
+</script>
+</body>
+</html>
