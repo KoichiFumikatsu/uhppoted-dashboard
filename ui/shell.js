@@ -8,9 +8,11 @@
     { cap: "ver_dashboard",           href: "/analytics/dashboard.html", label: "Dashboard" },
     { cap: "editar_tarjetas",         href: "/portal/cards.html",       label: "Tarjetas" },
     { cap: "editar_tarjetas",         href: "/portal/groups.html",      label: "Grupos" },
+    { cap: "editar_tarjetas",         href: "/portal/doors.html",       label: "Puertas" },
     { cap: "editar_horarios",         href: "/schedules/",              label: "Horarios" },
     { cap: "gestionar_controladores", href: "/portal/controllers.html",  label: "Controladores" },
     { cap: "publicar_acl",            href: "/schedules/",              label: "Publicar" },
+    { cap: "ver_logs",                href: "/portal/logs.html",        label: "Logs" },
     { cap: "ver_panel",               href: "/",                        label: "Panel" },
     { cap: "gestionar_usuarios",      href: "/portal/users.html",       label: "Usuarios" },
   ];

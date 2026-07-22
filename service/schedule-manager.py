@@ -19,9 +19,15 @@ import http.server
 import json
 import ssl
 import subprocess
+import sys
 import threading
+import sqlite3
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+sys.path.insert(0, "/root/uhppoted-dashboard")
+from doors_analytics import config as _cfg
+from doors_analytics import db as _db
 
 PORT = 8446
 CERT = '/etc/uhppoted/httpd/uhppoted.cert'
@@ -30,8 +36,23 @@ CONTROLLER = '222451671'
 CLI = '/usr/local/bin/uhppote-cli'
 CARDS_JSON = Path('/var/uhppoted/httpd/system/cards.json')
 DOORS_JSON = Path('/var/uhppoted/httpd/system/doors.json')
+LOGS_JSON = Path('/var/uhppoted/httpd/system/logs.json')
+DOOR_NAMES_JSON = Path('/var/uhppoted/analytics/door-names.json')
 
 WEEKDAYS_CLI = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+
+def _audit(actor, action, target, details, result):
+    """Best-effort portal-action audit into doors.db. Never raises."""
+    try:
+        c = sqlite3.connect(_cfg.DB_PATH, timeout=5)
+        try:
+            c.execute("PRAGMA busy_timeout=5000")
+            _db.insert_audit(c, actor, action, target, details, result)
+        finally:
+            c.close()
+    except Exception:
+        pass
 
 
 def _run(args, timeout=8):
@@ -281,12 +302,71 @@ def api_cards_list():
     return 200, {'cards': out}
 
 
+def _door_name_overrides():
+    if not DOOR_NAMES_JSON.exists():
+        return {}
+    try:
+        with open(DOOR_NAMES_JSON) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def api_doors():
     if not DOORS_JSON.exists():
         return 200, {'doors': []}
     with open(DOORS_JSON) as f:
         data = json.load(f)
-    return 200, {'doors': data.get('doors', [])}
+    doors = data.get('doors', [])
+    ov = _door_name_overrides()
+    for d in doors:
+        oid = str(d.get('OID', ''))
+        if oid in ov:
+            d['name'] = ov[oid]
+    return 200, {'doors': doors}
+
+
+def api_set_door_name(oid, body):
+    name = (body.get('name') or '').strip()
+    if not name:
+        return 400, {'error': 'nombre vacio'}
+    ov = _door_name_overrides()
+    ov[str(oid)] = name
+    try:
+        DOOR_NAMES_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(DOOR_NAMES_JSON) + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(ov, f, indent=1, ensure_ascii=False)
+        Path(tmp).replace(DOOR_NAMES_JSON)
+    except Exception as e:
+        return 500, {'error': str(e)}
+    return 200, {'ok': True, 'oid': str(oid), 'name': name}
+
+
+def api_logs(qs):
+    """Passthrough del log de auditoría del panel nativo (logs.json)."""
+    if not LOGS_JSON.exists():
+        return 200, {'rows': [], 'count': 0}
+    try:
+        with open(LOGS_JSON) as f:
+            data = json.load(f)
+    except Exception as e:
+        return 500, {'error': str(e)}
+    rows = data.get('logs', data) if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        rows = list(rows.values()) if isinstance(rows, dict) else []
+    frm = (qs.get('from', [None])[0]) or None
+    to = (qs.get('to', [None])[0]) or None
+    if frm:
+        rows = [r for r in rows if str(r.get('timestamp', '')) >= frm]
+    if to:
+        rows = [r for r in rows if str(r.get('timestamp', '')) <= to + '~']
+    rows.sort(key=lambda r: str(r.get('timestamp', '')), reverse=True)
+    try:
+        limit = min(int((qs.get('limit', ['500'])[0]) or 500), 5000)
+    except ValueError:
+        limit = 500
+    return 200, {'rows': rows[:limit], 'count': len(rows[:limit])}
 
 
 # ---- ACL generator / publish (B-desde-panel) ----
@@ -748,8 +828,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
+    def _actor(self):
+        return self.headers.get('X-Portal-User', '?')
+
+    def _write(self, p, method, code_obj, body):
+        """Send response and record a portal-action audit row for mutations."""
+        code, obj = code_obj
+        if code != 404:
+            details = ''
+            if isinstance(body, dict) and body:
+                details = json.dumps(body, ensure_ascii=False)[:300]
+            _audit(self._actor(), method + ' ' + p, p, details, str(code))
+        return self._json(code, obj)
+
     def do_GET(self):
         p = urlparse(self.path).path.rstrip('/')
+        qs = parse_qs(urlparse(self.path).query)
         if p in ('', '/', '/api'):
             return self._json(200, {'service': 'schedule-manager', 'controller': CONTROLLER})
         if p == '/api/profiles':
@@ -764,6 +858,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(*api_doors())
         if p == '/api/groups':
             return self._json(*api_groups())
+        if p == '/api/logs':
+            return self._json(*api_logs(qs))
         if p == '/api/teq-events':
             return self._json(*api_teq_events())
         if p == '/api/controllers-status':
@@ -782,34 +878,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
         p = urlparse(self.path).path.rstrip('/')
         body = self._body()
         if p.startswith('/api/profile/'):
-            return self._json(*api_put_profile(p.split('/')[-1], body))
+            return self._write(p, 'PUT', api_put_profile(p.split('/')[-1], body), body)
         if p.startswith('/api/card/'):
-            return self._json(*api_put_card(p.split('/')[-1], body))
+            return self._write(p, 'PUT', api_put_card(p.split('/')[-1], body), body)
+        if p.startswith('/api/doors/') and p.endswith('/name'):
+            return self._write(p, 'PUT', api_set_door_name(p.split('/')[3], body), body)
         if p.startswith('/api/controllers/') and p.endswith('/name'):
-            return self._json(*api_set_controller_name(p.split('/')[3], body))
+            return self._write(p, 'PUT', api_set_controller_name(p.split('/')[3], body), body)
         if p == '/api/role-profiles':
-            return self._json(*api_put_role_profiles(body))
+            return self._write(p, 'PUT', api_put_role_profiles(body), body)
         return self._json(404, {'error': 'not found'})
 
     def do_DELETE(self):
         p = urlparse(self.path).path.rstrip('/')
         if p.startswith('/api/profile/'):
-            return self._json(*api_delete_profile(p.split('/')[-1]))
+            return self._write(p, 'DELETE', api_delete_profile(p.split('/')[-1]), {})
         return self._json(404, {'error': 'not found'})
 
     def do_POST(self):
         p = urlparse(self.path).path.rstrip('/')
         body = self._body()
         if p == '/api/bulk-assign':
-            return self._json(*api_bulk_assign(body))
+            return self._write(p, 'POST', api_bulk_assign(body), body)
         if p == '/api/publish':
-            return self._json(*api_publish(body))
+            return self._write(p, 'POST', api_publish(body), body)
         if p == '/api/controllers-refresh':
             return self._json(*api_controllers_refresh())
         if p.startswith('/api/controllers/') and p.endswith('/set-time'):
-            return self._json(*api_set_time(p.split('/')[3]))
+            return self._write(p, 'POST', api_set_time(p.split('/')[3]), {})
         if p.startswith('/api/controllers/') and p.endswith('/open-door'):
-            return self._json(*api_open_door(p.split('/')[3], body))
+            return self._write(p, 'POST', api_open_door(p.split('/')[3], body), body)
         return self._json(404, {'error': 'not found'})
 
 

@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, "/root/uhppoted-dashboard")
 from doors_analytics import portal_auth as pa
+from doors_analytics import config, db
+import sqlite3
 
 USERS_PATH = "/etc/uhppoted/portal/users.json"
 SECRET_PATH = "/etc/uhppoted/portal/secret"
@@ -16,6 +18,19 @@ COOKIE = "doors_session"
 def _secret():
     with open(SECRET_PATH, "rb") as f:
         return f.read()
+
+
+def _audit(actor, action, target, details, result):
+    """Best-effort portal-action audit into doors.db. Never raises."""
+    try:
+        c = sqlite3.connect(config.DB_PATH, timeout=5)
+        try:
+            c.execute("PRAGMA busy_timeout=5000")
+            db.insert_audit(c, actor, action, target, details, result)
+        finally:
+            c.close()
+    except Exception:
+        pass
 
 
 def _current_user(handler):
@@ -38,11 +53,13 @@ def _current_user(handler):
 
 
 class H(BaseHTTPRequestHandler):
-    def _send(self, code, obj=None, cookie=None):
+    def _send(self, code, obj=None, cookie=None, extra=None):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         if cookie is not None:
             self.send_header("Set-Cookie", cookie)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         if obj is not None:
             self.wfile.write(json.dumps(obj).encode())
@@ -71,7 +88,8 @@ class H(BaseHTTPRequestHandler):
             if user is None:
                 self._send(401); return
             cap = pa.required_cap(self.headers.get("X-Original-URI", "/"))
-            self._send(200 if pa.user_has_cap(caps, cap) else 403); return
+            ok = pa.user_has_cap(caps, cap)
+            self._send(200 if ok else 403, extra={"X-Portal-User": user}); return
         if path == "/auth/me":
             user, caps = _current_user(self)
             if user is None:
@@ -91,15 +109,20 @@ class H(BaseHTTPRequestHandler):
             b = self._body()
             users = pa.load_users(USERS_PATH)
             u = users.get(b.get("username", ""))
+            uname = b.get("username", "")
             if u and pa.verify_password(b.get("password", ""), u["salt"], u["hash"]):
-                tok = pa.make_token(b["username"], _secret(), now_ts=time.time())
+                tok = pa.make_token(uname, _secret(), now_ts=time.time())
                 c = "%s=%s; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200" % (COOKIE, tok)
                 self._send(200, {"name": u.get("name"), "caps": u.get("caps", [])}, cookie=c)
+                _audit(uname, "login", "auth", "", "ok")
             else:
                 self._send(401, {"error": "credenciales invalidas"})
+                _audit(uname or "?", "login", "auth", "", "fail")
             return
         if path == "/auth/logout":
-            self._send(200, {"ok": True}, cookie="%s=; Max-Age=0; Path=/" % COOKIE); return
+            u, _ = _current_user(self)
+            self._send(200, {"ok": True}, cookie="%s=; Max-Age=0; Path=/" % COOKIE)
+            _audit(u or "?", "logout", "auth", "", "ok"); return
         if path == "/auth/users":
             caller = self._require("gestionar_usuarios")
             if caller is None: return
@@ -111,16 +134,19 @@ class H(BaseHTTPRequestHandler):
                 pa.create_user(users, b["username"], b.get("name", b["username"]), b["password"], b.get("caps", []))
             except (ValueError, KeyError) as e:
                 self._send(400, {"error": str(e)}); return
-            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
+            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True})
+            _audit(caller, "crear-usuario", b.get("username", ""), ",".join(b.get("caps", [])), "ok"); return
         if path.startswith("/auth/users/") and path.endswith("/password"):
-            if self._require("gestionar_usuarios") is None: return
+            caller = self._require("gestionar_usuarios")
+            if caller is None: return
             uname = path[len("/auth/users/"):-len("/password")]
             b = self._body(); users = pa.load_users(USERS_PATH)
             try:
                 pa.set_password(users, uname, b["password"])
             except (ValueError, KeyError) as e:
                 self._send(400, {"error": str(e)}); return
-            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
+            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True})
+            _audit(caller, "cambiar-password", uname, "", "ok"); return
         self._send(404, {"error": "not found"})
 
     def do_PUT(self):
@@ -137,7 +163,9 @@ class H(BaseHTTPRequestHandler):
                 pa.update_user(users, uname, name=b.get("name"), caps=b.get("caps"))
             except ValueError as e:
                 self._send(400, {"error": str(e)}); return
-            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
+            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True})
+            _audit(caller, "editar-usuario", uname,
+                   ",".join(b.get("caps") or []) if b.get("caps") is not None else "", "ok"); return
         self._send(404, {"error": "not found"})
 
     def do_DELETE(self):
@@ -153,7 +181,8 @@ class H(BaseHTTPRequestHandler):
             if not pa.can_delete_user(caller_caps, target_caps, star_after):
                 self._send(403, {"error": "no puede borrar ese usuario"}); return
             pa.delete_user(users, uname)
-            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
+            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True})
+            _audit(caller, "borrar-usuario", uname, "", "ok"); return
         self._send(404, {"error": "not found"})
 
     def log_message(self, *a):

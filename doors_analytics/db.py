@@ -55,11 +55,32 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     last_run   TEXT,
     PRIMARY KEY (source, device_id)
 );
+
+CREATE TABLE IF NOT EXISTS portal_audit (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts      TEXT NOT NULL,
+    actor   TEXT,
+    action  TEXT,
+    target  TEXT,
+    details TEXT,
+    result  TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_audit_ts ON portal_audit(ts);
 """
 
 
 def init_db(conn):
     conn.executescript(SCHEMA)
+    conn.commit()
+
+
+def insert_audit(conn, actor, action, target, details, result):
+    """Append one portal-action audit row. Best-effort; caller swallows errors."""
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO portal_audit (ts, actor, action, target, details, result) "
+        "VALUES (?,?,?,?,?,?)",
+        (now, actor, action, target, details, result))
     conn.commit()
 
 

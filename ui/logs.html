@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Logs — AZC Accesos</title>
+<link rel="stylesheet" href="/portal/shell.css">
+<style>
+  body{margin:0;background:#0f1720;color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+  .head{padding:14px 20px;border-bottom:1px solid #2a3a49;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .head b{font-size:16px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#182430;border:1px solid #2a3a49;color:#9fb0c0}
+  .tabs{display:flex;gap:6px;padding:12px 20px 0}
+  .tab{padding:7px 14px;border-radius:8px 8px 0 0;background:#141d27;border:1px solid #2a3a49;border-bottom:none;color:#9fb0c0;cursor:pointer;font-size:13px}
+  .tab.active{background:#182430;color:#e6edf3;font-weight:600}
+  .bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;padding:14px 20px;background:#141d27;border-bottom:1px solid #2a3a49}
+  .fld{display:flex;flex-direction:column;gap:3px}
+  .fld label{font-size:10px;color:#9fb0c0;text-transform:uppercase;letter-spacing:.04em}
+  input,select{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:12px}
+  button{background:#3987e5;color:#04121f;border:none;padding:7px 13px;border-radius:6px;font-weight:600;cursor:pointer;font-size:12px}
+  .wrap{padding:0 20px 30px;overflow-x:auto}
+  table{border-collapse:collapse;width:100%;font-size:12px;margin-top:14px}
+  th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #22303d;white-space:nowrap}
+  th{color:#9fb0c0;font-weight:600;position:sticky;top:0;background:#0f1720}
+  td.wide{white-space:normal;min-width:220px;color:#c7d3de}
+  .pill{font-size:10px;padding:2px 7px;border-radius:9px;border:1px solid #2a3a49}
+  .ok{color:#0ca30c;border-color:#0ca30c33}.bad{color:#d03b3b;border-color:#d03b3b33}
+  .muted{color:#9fb0c0}
+</style>
+</head>
+<body>
+<div class="head"><b>Logs y auditoría</b><span class="badge" id="count">—</span></div>
+<div class="tabs">
+  <div class="tab active" id="t-portal" onclick="switchTab('portal')">Acciones del portal</div>
+  <div class="tab" id="t-panel" onclick="switchTab('panel')">Auditoría del panel</div>
+</div>
+<div class="bar">
+  <div class="fld"><label>Desde</label><input type="date" id="from"></div>
+  <div class="fld"><label>Hasta</label><input type="date" id="to"></div>
+  <div class="fld"><label>Límite</label><select id="limit"><option>200</option><option selected>500</option><option>1000</option><option>2000</option></select></div>
+  <button onclick="reload()">Aplicar</button>
+</div>
+<div class="wrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
+
+<link rel="stylesheet" href="/portal/shell.css">
+<script src="/portal/shell.js"></script>
+<script>
+let TAB="portal";
+function escapeHtml(s){const d=document.createElement("div");d.textContent=String(s==null?"":s);return d.innerHTML;}
+function qs(){
+  const p=new URLSearchParams();
+  const f=document.getElementById("from").value, t=document.getElementById("to").value;
+  if(f) p.set("from",f); if(t) p.set("to",t);
+  p.set("limit",document.getElementById("limit").value);
+  return p.toString();
+}
+function switchTab(tab){
+  TAB=tab;
+  document.getElementById("t-portal").classList.toggle("active",tab==="portal");
+  document.getElementById("t-panel").classList.toggle("active",tab==="panel");
+  reload();
+}
+async function reload(){
+  const url = TAB==="portal" ? `/analytics/api/portal-audit?${qs()}` : `/schedules/api/logs?${qs()}`;
+  const thead=document.querySelector("#tbl thead"), tbody=document.querySelector("#tbl tbody");
+  tbody.innerHTML="<tr><td class='muted'>Cargando…</td></tr>";
+  let r;
+  try{ r=await fetch(url); }catch(e){ tbody.innerHTML="<tr><td class='muted'>Error de red</td></tr>"; return; }
+  if(!r.ok){ if(r.status===401) location.href="/portal/login.html"; tbody.innerHTML=`<tr><td class='muted'>Sin acceso (${r.status})</td></tr>`; return; }
+  const rows=(await r.json()).rows||[];
+  document.getElementById("count").textContent=rows.length+" registros";
+  if(TAB==="portal"){
+    thead.innerHTML="<tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Objetivo</th><th>Detalle</th><th>Resultado</th></tr>";
+    tbody.innerHTML = rows.length ? rows.map(x=>{
+      const okc = (x.result==="ok"||x.result==="200"||x.result==="201") ? "ok":"bad";
+      return `<tr><td>${escapeHtml(x.ts)}</td><td>${escapeHtml(x.actor)}</td>`+
+             `<td>${escapeHtml(x.action)}</td><td class="muted">${escapeHtml(x.target)}</td>`+
+             `<td class="wide muted">${escapeHtml(x.details)}</td>`+
+             `<td><span class="pill ${okc}">${escapeHtml(x.result)}</span></td></tr>`;
+    }).join("") : "<tr><td class='muted'>Sin registros en el rango</td></tr>";
+  }else{
+    thead.innerHTML="<tr><th>Fecha</th><th>Usuario</th><th>Ítem</th><th>Nombre</th><th>Campo</th><th>Detalle</th></tr>";
+    tbody.innerHTML = rows.length ? rows.map(x=>
+      `<tr><td>${escapeHtml((x.timestamp||"").replace("T"," ").slice(0,19))}</td><td>${escapeHtml(x.UID)}</td>`+
+      `<td>${escapeHtml(x.item)}</td><td>${escapeHtml(x.name)}</td>`+
+      `<td class="muted">${escapeHtml(x.field)}</td><td class="wide muted">${escapeHtml(x.details)}</td></tr>`
+    ).join("") : "<tr><td class='muted'>Sin registros en el rango</td></tr>";
+  }
+}
+reload();
+</script>
+</body>
+</html>

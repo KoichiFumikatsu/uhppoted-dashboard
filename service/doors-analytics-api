@@ -76,6 +76,30 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     conn.close()
                 self._send(200, json.dumps(res))
+            elif path == "/api/portal-audit":
+                frm = (qs.get("from", [None])[0]) or None
+                to = (qs.get("to", [None])[0]) or None
+                try:
+                    limit = min(int((qs.get("limit", ["500"])[0]) or 500), 5000)
+                except ValueError:
+                    limit = 500
+                where, params = [], []
+                if frm:
+                    where.append("ts >= ?"); params.append(frm)
+                if to:
+                    where.append("ts <= ?"); params.append(to + "~")
+                sql = "SELECT ts, actor, action, target, details, result FROM portal_audit"
+                if where:
+                    sql += " WHERE " + " AND ".join(where)
+                sql += " ORDER BY id DESC LIMIT ?"; params.append(limit)
+                conn = _conn()
+                try:
+                    cur = conn.execute(sql, params)
+                    cols = [d[0] for d in cur.description]
+                    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                finally:
+                    conn.close()
+                self._send(200, json.dumps({"rows": rows, "count": len(rows)}))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception as e:

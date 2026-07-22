@@ -71,11 +71,13 @@ def _normalize_path(uri):
 
 
 _RULES = [
+    ("/analytics/api/portal-audit", "ver_logs"),
     ("/analytics/api/kpis", "ver_dashboard"),
     ("/analytics/api/events", "ver_eventos"),
     ("/analytics/dashboard", "ver_dashboard"),
     ("/analytics/api", "ver_eventos"),
     ("/analytics", "ver_eventos"),
+    ("/schedules/api/logs", "ver_logs"),
     ("/schedules/api/profile", "editar_horarios"),
     ("/schedules/api/card", "editar_tarjetas"),
     ("/schedules/api/bulk-assign", "editar_tarjetas"),
@@ -109,6 +111,7 @@ CAPS = [
     ("publicar_acl", "Publicar ACL a controladores"),
     ("gestionar_controladores", "Gestionar Controladores"),
     ("abrir_puerta", "Abrir Puerta"),
+    ("ver_logs", "Ver Logs y auditoría"),
     ("ver_panel", "Ver Panel nativo (uhppoted)"),
     ("gestionar_usuarios", "Gestionar Usuarios"),
 ]

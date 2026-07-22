@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Puertas — AZC Accesos</title>
+<link rel="stylesheet" href="/portal/shell.css">
+<style>
+  body{margin:0;background:#0f1720;color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+  .head{padding:14px 20px;border-bottom:1px solid #2a3a49;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .head b{font-size:16px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#182430;border:1px solid #2a3a49;color:#9fb0c0}
+  .note{color:#9fb0c0;font-size:12px;padding:8px 20px;background:#141d27;border-bottom:1px solid #2a3a49}
+  button{background:#3987e5;color:#04121f;border:none;padding:6px 11px;border-radius:6px;font-weight:600;cursor:pointer;font-size:12px}
+  button.sec{background:#182430;color:#e6edf3;border:1px solid #2a3a49}
+  button:disabled{opacity:.5;cursor:wait}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:18px 20px}
+  .card{background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:16px}
+  .card h3{margin:0 0 4px;font-size:15px}
+  .meta{color:#9fb0c0;font-size:12px;line-height:1.7;margin:8px 0}
+  .meta b{color:#e6edf3;font-weight:600}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  input{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:12px;min-width:140px}
+  .msg{font-size:11px;color:#9fb0c0;min-height:14px;margin-top:6px}
+  .warn{color:#fab219}
+  .tag{font-size:10px;padding:2px 7px;border-radius:9px;background:#0f1720;border:1px solid #2a3a49;color:#9fb0c0}
+</style>
+</head>
+<body>
+<div class="head"><b>Puertas</b><span class="badge" id="count">—</span></div>
+<div class="note">Config de puertas: nombre, retardo de apertura y modo. Aquí solo se edita el nombre (el nombre se muestra en el portal). Cambiar retardo/modo se hace por ahora en el Panel nativo.</div>
+<div class="grid" id="grid"></div>
+
+<link rel="stylesheet" href="/portal/shell.css">
+<script src="/portal/shell.js"></script>
+<script>
+const API="/schedules/api";
+const MODES={"controlled":"Controlada","normally open":"Normalmente abierta","normally closed":"Normalmente cerrada"};
+function escapeHtml(s){const d=document.createElement("div");d.textContent=String(s==null?"":s);return d.innerHTML;}
+
+async function load(){
+  const r=await fetch(`${API}/doors`);
+  if(!r.ok){ if(r.status===401) location.href="/portal/login.html"; document.getElementById("grid").innerHTML="<p style='padding:20px;color:#9fb0c0'>Sin acceso a puertas.</p>"; return; }
+  const doors=(await r.json()).doors||[];
+  document.getElementById("count").textContent=doors.length+" puertas";
+  const g=document.getElementById("grid"); g.innerHTML="";
+  for(const d of doors){
+    const card=document.createElement("div"); card.className="card";
+    const modo=MODES[d.mode]||d.mode||"—";
+    card.innerHTML=
+      `<h3>${escapeHtml(d.name||d.OID)}</h3>`+
+      `<div class="meta">OID <b>${escapeHtml(d.OID)}</b> · Retardo <b>${d.delay!=null?d.delay+"s":"—"}</b><br>`+
+      `Modo <span class="tag">${escapeHtml(modo)}</span></div>`;
+    const row=document.createElement("div"); row.className="row";
+    const inp=document.createElement("input"); inp.value=d.name||""; inp.placeholder="nombre";
+    const b=document.createElement("button"); b.className="sec"; b.textContent="Renombrar";
+    b.onclick=()=>rename(card, d.OID, inp.value.trim());
+    row.appendChild(inp); row.appendChild(b); card.appendChild(row);
+    const msg=document.createElement("div"); msg.className="msg"; card.appendChild(msg);
+    g.appendChild(card);
+  }
+}
+async function rename(card, oid, name){
+  const msg=card.querySelector(".msg"); msg.className="msg"; msg.textContent="…";
+  if(!name){ msg.className="msg warn"; msg.textContent="Nombre vacío"; return; }
+  try{
+    const r=await fetch(`${API}/doors/${encodeURIComponent(oid)}/name`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok){ msg.textContent="Nombre actualizado"; load(); }
+    else{ msg.className="msg warn"; msg.textContent="Error: "+(d.error||r.status); }
+  }catch(e){ msg.className="msg warn"; msg.textContent="Error de red"; }
+}
+load();
+</script>
+</body>
+</html>
