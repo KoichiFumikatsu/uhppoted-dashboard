@@ -101,8 +101,12 @@ class H(BaseHTTPRequestHandler):
         if path == "/auth/logout":
             self._send(200, {"ok": True}, cookie="%s=; Max-Age=0; Path=/" % COOKIE); return
         if path == "/auth/users":
-            if self._require("gestionar_usuarios") is None: return
+            caller = self._require("gestionar_usuarios")
+            if caller is None: return
+            _, caller_caps = _current_user(self)
             b = self._body(); users = pa.load_users(USERS_PATH)
+            if not pa.can_assign_caps(caller_caps, caller, b.get("username", ""), b.get("caps", [])):
+                self._send(403, {"error": "no puede otorgar esas capacidades"}); return
             try:
                 pa.create_user(users, b["username"], b.get("name", b["username"]), b["password"], b.get("caps", []))
             except (ValueError, KeyError) as e:
@@ -122,9 +126,13 @@ class H(BaseHTTPRequestHandler):
     def do_PUT(self):
         path = urlparse(self.path).path.rstrip("/") or "/"
         if path.startswith("/auth/users/"):
-            if self._require("gestionar_usuarios") is None: return
+            caller = self._require("gestionar_usuarios")
+            if caller is None: return
+            _, caller_caps = _current_user(self)
             uname = path[len("/auth/users/"):]
             b = self._body(); users = pa.load_users(USERS_PATH)
+            if b.get("caps") is not None and not pa.can_assign_caps(caller_caps, caller, uname, b.get("caps")):
+                self._send(403, {"error": "no puede asignar esas capacidades"}); return
             try:
                 pa.update_user(users, uname, name=b.get("name"), caps=b.get("caps"))
             except ValueError as e:
@@ -135,9 +143,16 @@ class H(BaseHTTPRequestHandler):
     def do_DELETE(self):
         path = urlparse(self.path).path.rstrip("/") or "/"
         if path.startswith("/auth/users/"):
-            if self._require("gestionar_usuarios") is None: return
+            caller = self._require("gestionar_usuarios")
+            if caller is None: return
+            _, caller_caps = _current_user(self)
             uname = path[len("/auth/users/"):]
-            users = pa.load_users(USERS_PATH); pa.delete_user(users, uname)
+            users = pa.load_users(USERS_PATH)
+            target_caps = users.get(uname, {}).get("caps", [])
+            star_after = sum(1 for u, d in users.items() if u != uname and "*" in d.get("caps", []))
+            if not pa.can_delete_user(caller_caps, target_caps, star_after):
+                self._send(403, {"error": "no puede borrar ese usuario"}); return
+            pa.delete_user(users, uname)
             pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
         self._send(404, {"error": "not found"})
 

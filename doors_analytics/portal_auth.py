@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import secrets
+import urllib.parse
 
 _ITER = 200000
 
@@ -51,11 +52,30 @@ def user_has_cap(caps, required):
     return "*" in caps or required in caps
 
 
+def _normalize_path(uri):
+    u = uri.split("?", 1)[0]
+    prev = None
+    while prev != u:                      # decodificar %xx repetido (anti doble-encoding)
+        prev = u
+        u = urllib.parse.unquote(u)
+    parts = []
+    for seg in u.split("/"):
+        if seg == "" or seg == ".":
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    return "/" + "/".join(parts)
+
+
 _RULES = [
     ("/analytics/api/kpis", "ver_dashboard"),
     ("/analytics/api/events", "ver_eventos"),
     ("/analytics/dashboard", "ver_dashboard"),
-    ("/analytics/", "ver_eventos"),
+    ("/analytics/api", "ver_eventos"),
+    ("/analytics", "ver_eventos"),
     ("/schedules/api/profile", "editar_horarios"),
     ("/schedules/api/card", "editar_tarjetas"),
     ("/schedules/api/bulk-assign", "editar_tarjetas"),
@@ -65,14 +85,16 @@ _RULES = [
     ("/schedules/api/role-profiles", "publicar_acl"),
     ("/schedules/api/controllers", "gestionar_controladores"),
     ("/schedules/api/teq-events", "ver_eventos"),
-    ("/door-opener/", "abrir_puerta"),
+    ("/schedules/api", "editar_tarjetas"),   # fail-closed: API de schedules no mapeada exige write
+    ("/schedules", "sesion"),
+    ("/door-opener", "abrir_puerta"),
 ]
 
 
 def required_cap(uri):
-    u = uri.split("?", 1)[0]
-    for prefix, cap in _RULES:
-        if u.startswith(prefix):
+    p = _normalize_path(uri)
+    for base, cap in _RULES:
+        if p.startswith(base):
             return cap
     return "sesion"
 
@@ -147,3 +169,23 @@ def delete_user(users, username):
 def public_users(users):
     return [{"username": u, "name": d.get("name", u), "caps": d.get("caps", [])}
             for u, d in sorted(users.items())]
+
+
+def can_assign_caps(caller_caps, caller_username, target_username, requested_caps):
+    # solo un super-admin ('*') puede otorgar '*'
+    if "*" in (requested_caps or []) and "*" not in caller_caps:
+        return False
+    # un no-super-admin no puede editar sus PROPIAS capacidades (evita auto-escalada)
+    if target_username == caller_username and "*" not in caller_caps:
+        return False
+    return True
+
+
+def can_delete_user(caller_caps, target_caps, star_users_after_delete):
+    # borrar un super-admin exige ser super-admin y no dejar el sistema sin ninguno
+    if "*" in (target_caps or []):
+        if "*" not in caller_caps:
+            return False
+        if star_users_after_delete < 1:
+            return False
+    return True

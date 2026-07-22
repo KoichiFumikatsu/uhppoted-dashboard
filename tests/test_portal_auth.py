@@ -99,5 +99,35 @@ class TestUsers(unittest.TestCase):
         self.assertNotIn("salt", pub[0])
 
 
+class TestRequiredCapNormalization(unittest.TestCase):
+    def test_double_slash_bypass_blocked(self):
+        self.assertEqual(pa.required_cap("//door-opener/open-door"), "abrir_puerta")
+        self.assertEqual(pa.required_cap("//schedules/api/card/1"), "editar_tarjetas")
+    def test_dot_segment_bypass_blocked(self):
+        self.assertEqual(pa.required_cap("/schedules/api/x/../card/1"), "editar_tarjetas")
+        self.assertEqual(pa.required_cap("/schedules/api/./card/1"), "editar_tarjetas")
+    def test_percent_encoding_bypass_blocked(self):
+        self.assertEqual(pa.required_cap("/schedules/api/%63ard/1"), "editar_tarjetas")
+    def test_unmapped_schedules_api_fails_closed(self):
+        self.assertEqual(pa.required_cap("/schedules/api/newthing"), "editar_tarjetas")
+        self.assertEqual(pa.required_cap("/schedules/api/groups/9"), "editar_tarjetas")
+    def test_normal_paths_still_map(self):
+        self.assertEqual(pa.required_cap("/analytics/api/kpis?x=1"), "ver_dashboard")
+        self.assertEqual(pa.required_cap("/schedules/api/profiles"), "editar_horarios")
+        self.assertEqual(pa.required_cap("/schedules/"), "sesion")
+
+class TestPrivilegeCeiling(unittest.TestCase):
+    def test_nonadmin_cannot_grant_star(self):
+        self.assertFalse(pa.can_assign_caps(["gestionar_usuarios"], "johan", "x", ["*"]))
+        self.assertTrue(pa.can_assign_caps(["*"], "koichi", "x", ["*"]))
+    def test_nonadmin_cannot_self_edit_caps(self):
+        self.assertFalse(pa.can_assign_caps(["gestionar_usuarios"], "johan", "johan", ["ver_eventos"]))
+        self.assertTrue(pa.can_assign_caps(["*"], "koichi", "koichi", ["*"]))
+    def test_cannot_delete_last_superadmin(self):
+        self.assertFalse(pa.can_delete_user(["*"], ["*"], 0))   # dejaria 0 super-admins
+        self.assertTrue(pa.can_delete_user(["*"], ["*"], 1))
+        self.assertFalse(pa.can_delete_user(["gestionar_usuarios"], ["*"], 5))  # no-admin no borra admin
+
+
 if __name__ == "__main__":
     unittest.main()
