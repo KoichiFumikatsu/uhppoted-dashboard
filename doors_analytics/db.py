@@ -61,3 +61,21 @@ CREATE TABLE IF NOT EXISTS ingest_state (
 def init_db(conn):
     conn.executescript(SCHEMA)
     conn.commit()
+
+
+# añadir a doors_analytics/db.py
+def upsert_events(conn, events):
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    rows = [(
+        e["device_id"], e["idx"], e.get("timestamp"), e.get("card"),
+        e.get("door"), e.get("door_name"), e.get("granted"), e.get("reason"),
+        e.get("direction"), e.get("event_type"), e.get("sede"),
+        e.get("source"), now,
+    ) for e in events]
+    conn.executemany(
+        "INSERT OR IGNORE INTO events "
+        "(device_id, idx, timestamp, card, door, door_name, granted, reason, "
+        " direction, event_type, sede, source, ingested_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    return len(rows)
