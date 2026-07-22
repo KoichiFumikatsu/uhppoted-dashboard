@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+import json
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse
+
+sys.path.insert(0, "/root/uhppoted-dashboard")
+from doors_analytics import portal_auth as pa
+
+USERS_PATH = "/etc/uhppoted/portal/users.json"
+SECRET_PATH = "/etc/uhppoted/portal/secret"
+COOKIE = "doors_session"
+
+
+def _secret():
+    with open(SECRET_PATH, "rb") as f:
+        return f.read()
+
+
+def _current_user(handler):
+    # devuelve (username, caps) o (None, None)
+    cookie = handler.headers.get("Cookie", "")
+    tok = None
+    for part in cookie.split(";"):
+        p = part.strip()
+        if p.startswith(COOKIE + "="):
+            tok = p[len(COOKIE) + 1:]
+    if not tok:
+        return None, None
+    username = pa.verify_token(tok, _secret(), now_ts=time.time())
+    if not username:
+        return None, None
+    users = pa.load_users(USERS_PATH)
+    if username not in users:
+        return None, None
+    return username, users[username].get("caps", [])
+
+
+class H(BaseHTTPRequestHandler):
+    def _send(self, code, obj=None, cookie=None):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        if cookie is not None:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        if obj is not None:
+            self.wfile.write(json.dumps(obj).encode())
+
+    def _body(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if not n:
+            return {}
+        try:
+            return json.loads(self.rfile.read(n).decode())
+        except Exception:
+            return {}
+
+    def _require(self, cap):
+        user, caps = _current_user(self)
+        if user is None:
+            self._send(401, {"error": "no session"}); return None
+        if not pa.user_has_cap(caps, cap):
+            self._send(403, {"error": "forbidden"}); return None
+        return user
+
+    def do_GET(self):
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path == "/auth/check":
+            user, caps = _current_user(self)
+            if user is None:
+                self._send(401); return
+            cap = pa.required_cap(self.headers.get("X-Original-URI", "/"))
+            self._send(200 if pa.user_has_cap(caps, cap) else 403); return
+        if path == "/auth/me":
+            user, caps = _current_user(self)
+            if user is None:
+                self._send(401, {"error": "no session"}); return
+            users = pa.load_users(USERS_PATH)
+            self._send(200, {"username": user, "name": users[user].get("name", user), "caps": caps}); return
+        if path == "/auth/caps":
+            self._send(200, pa.CAPS); return
+        if path == "/auth/users":
+            if self._require("gestionar_usuarios") is None: return
+            self._send(200, pa.public_users(pa.load_users(USERS_PATH))); return
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path == "/auth/login":
+            b = self._body()
+            users = pa.load_users(USERS_PATH)
+            u = users.get(b.get("username", ""))
+            if u and pa.verify_password(b.get("password", ""), u["salt"], u["hash"]):
+                tok = pa.make_token(b["username"], _secret(), now_ts=time.time())
+                c = "%s=%s; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200" % (COOKIE, tok)
+                self._send(200, {"name": u.get("name"), "caps": u.get("caps", [])}, cookie=c)
+            else:
+                self._send(401, {"error": "credenciales invalidas"})
+            return
+        if path == "/auth/logout":
+            self._send(200, {"ok": True}, cookie="%s=; Max-Age=0; Path=/" % COOKIE); return
+        if path == "/auth/users":
+            if self._require("gestionar_usuarios") is None: return
+            b = self._body(); users = pa.load_users(USERS_PATH)
+            try:
+                pa.create_user(users, b["username"], b.get("name", b["username"]), b["password"], b.get("caps", []))
+            except (ValueError, KeyError) as e:
+                self._send(400, {"error": str(e)}); return
+            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
+        if path.startswith("/auth/users/") and path.endswith("/password"):
+            if self._require("gestionar_usuarios") is None: return
+            uname = path[len("/auth/users/"):-len("/password")]
+            b = self._body(); users = pa.load_users(USERS_PATH)
+            try:
+                pa.set_password(users, uname, b["password"])
+            except (ValueError, KeyError) as e:
+                self._send(400, {"error": str(e)}); return
+            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
+        self._send(404, {"error": "not found"})
+
+    def do_PUT(self):
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path.startswith("/auth/users/"):
+            if self._require("gestionar_usuarios") is None: return
+            uname = path[len("/auth/users/"):]
+            b = self._body(); users = pa.load_users(USERS_PATH)
+            try:
+                pa.update_user(users, uname, name=b.get("name"), caps=b.get("caps"))
+            except ValueError as e:
+                self._send(400, {"error": str(e)}); return
+            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
+        self._send(404, {"error": "not found"})
+
+    def do_DELETE(self):
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path.startswith("/auth/users/"):
+            if self._require("gestionar_usuarios") is None: return
+            uname = path[len("/auth/users/"):]
+            users = pa.load_users(USERS_PATH); pa.delete_user(users, uname)
+            pa.save_users(USERS_PATH, users); self._send(200, {"ok": True}); return
+        self._send(404, {"error": "not found"})
+
+    def log_message(self, *a):
+        pass
+
+
+if __name__ == "__main__":
+    HTTPServer(("127.0.0.1", 8448), H).serve_forever()
