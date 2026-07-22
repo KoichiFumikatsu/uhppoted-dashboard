@@ -1,0 +1,40 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<title>AZC Accesos</title>
+<style>
+body{margin:0;background:#0f1720;color:#e6edf3;font-family:system-ui,Segoe UI,sans-serif}
+header{padding:16px 22px;border-bottom:1px solid #2a3a49;display:flex;justify-content:space-between;align-items:center}
+header b{font-size:18px}.who{color:#9fb0c0;font-size:13px}
+a.logout{color:#9fb0c0;text-decoration:none;font-size:13px;margin-left:14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;padding:22px}
+.tile{display:block;background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:20px;color:#e6edf3;text-decoration:none}
+.tile:hover{border-color:#3987e5}.tile h3{margin:0 0 6px;font-size:15px}.tile p{margin:0;color:#9fb0c0;font-size:12px}
+</style></head><body>
+<header><b>AZC Accesos</b><span><span class="who" id="who"></span><a class="logout" href="#" id="lo">Salir</a></span></header>
+<div class="grid" id="grid"></div>
+<script>
+const TILES=[
+ {cap:"ver_eventos",href:"/analytics/",t:"Eventos",d:"Historial de accesos por sede"},
+ {cap:"ver_dashboard",href:"/analytics/dashboard.html",t:"Dashboard",d:"KPIs de acceso"},
+ {cap:"editar_horarios",href:"/schedules/",t:"Horarios",d:"Time profiles"},
+ {cap:"editar_tarjetas",href:"/schedules/",t:"Tarjetas",d:"Altas/bajas y grupos"},
+ {cap:"publicar_acl",href:"/schedules/",t:"Publicar",d:"Empujar a controladores"},
+ {cap:"gestionar_controladores",href:"/schedules/",t:"Controladores",d:"Estado y gestión"},
+ {cap:"gestionar_usuarios",href:"/portal/users.html",t:"Usuarios",d:"Personas y permisos"},
+ {cap:"*",href:"/",t:"Panel nativo",d:"Panel uhppoted (super-admin)"},
+];
+(async()=>{
+ const r=await fetch("/auth/me"); if(!r.ok){location.href="/portal/login.html";return;}
+ const me=await r.json();
+ document.getElementById("who").textContent=me.name+" ("+me.username+")";
+ const has=c=>me.caps.includes("*")||me.caps.includes(c);
+ const g=document.getElementById("grid");
+ const seen=new Set();
+ for(const t of TILES){ if(!has(t.cap)) continue; if(seen.has(t.href+t.t))continue; seen.add(t.href+t.t);
+   const a=document.createElement("a");a.className="tile";a.href=t.href;
+   const h=document.createElement("h3");h.textContent=t.t;const p=document.createElement("p");p.textContent=t.d;
+   a.appendChild(h);a.appendChild(p);g.appendChild(a);
+ }
+})();
+document.getElementById("lo").onclick=async(e)=>{e.preventDefault();await fetch("/auth/logout",{method:"POST"});location.href="/portal/login.html";};
+</script></body></html>

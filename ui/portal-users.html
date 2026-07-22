@@ -1,0 +1,49 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<title>Usuarios — AZC Accesos</title>
+<style>
+body{margin:0;background:#0f1720;color:#e6edf3;font-family:system-ui,Segoe UI,sans-serif}
+header{padding:16px 22px;border-bottom:1px solid #2a3a49}header a{color:#9fb0c0;text-decoration:none;font-size:13px}
+.wrap{padding:22px;max-width:760px}
+.card{background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:16px;margin-bottom:16px}
+input{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:8px;border-radius:6px;margin:4px 6px 4px 0}
+button{background:#3987e5;color:#04121f;border:none;padding:8px 12px;border-radius:6px;font-weight:700;cursor:pointer}
+button.sec{background:#182430;color:#e6edf3;border:1px solid #2a3a49}
+label.cap{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#9fb0c0;margin:3px 10px 3px 0}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #2a3a49}
+</style></head><body>
+<header><b>Usuarios</b> &nbsp; <a href="/portal/">‹ Volver</a></header>
+<div class="wrap">
+ <div class="card"><h3>Nuevo usuario</h3>
+  <input id="nu" placeholder="usuario"><input id="nn" placeholder="Nombre"><input id="np" type="password" placeholder="contraseña"><br>
+  <div id="ncaps"></div>
+  <button id="create">Crear</button>
+ </div>
+ <div class="card"><h3>Existentes</h3><table id="tbl"><thead><tr><th>Usuario</th><th>Nombre</th><th>Capacidades</th><th></th></tr></thead><tbody></tbody></table></div>
+</div>
+<script>
+let CAPS=[];
+function capsChecklist(container,selected){container.innerHTML="";CAPS.forEach(([k,label])=>{
+  const l=document.createElement("label");l.className="cap";
+  const c=document.createElement("input");c.type="checkbox";c.value=k;c.checked=selected.includes(k)||selected.includes("*");
+  l.appendChild(c);l.appendChild(document.createTextNode(label));container.appendChild(l);});}
+function readChecklist(container){return [...container.querySelectorAll("input:checked")].map(c=>c.value);}
+async function load(){
+  const rc=await fetch("/auth/caps"); CAPS=await rc.json(); capsChecklist(document.getElementById("ncaps"),[]);
+  const r=await fetch("/auth/users"); if(!r.ok){location.href="/portal/login.html";return;}
+  const users=await r.json(); const tb=document.querySelector("#tbl tbody"); tb.innerHTML="";
+  users.forEach(u=>{const tr=document.createElement("tr");
+    [u.username,u.name,(u.caps.includes("*")?"TODO":u.caps.join(", "))].forEach(v=>{const td=document.createElement("td");td.textContent=v;tr.appendChild(td)});
+    const td=document.createElement("td");
+    const del=document.createElement("button");del.className="sec";del.textContent="Borrar";
+    del.onclick=async()=>{if(confirm("Borrar "+u.username+"?")){await fetch("/auth/users/"+u.username,{method:"DELETE"});load();}};
+    if(!u.caps.includes("*")) td.appendChild(del);
+    tr.appendChild(td);tb.appendChild(tr);});
+}
+document.getElementById("create").onclick=async()=>{
+  const body={username:nu.value.trim(),name:nn.value.trim(),password:np.value,caps:readChecklist(document.getElementById("ncaps"))};
+  const r=await fetch("/auth/users",{method:"POST",body:JSON.stringify(body)});
+  if(r.ok){nu.value=nn.value=np.value="";load();}else{alert("Error: "+(await r.json()).error);}
+};
+load();
+</script></body></html>
