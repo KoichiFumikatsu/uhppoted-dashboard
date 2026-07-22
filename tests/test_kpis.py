@@ -82,5 +82,39 @@ class TestKpis(unittest.TestCase):
             self.assertIn(key, k)
 
 
+class TestIncompleteDaysExcluded(unittest.TestCase):
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        db.init_db(self.conn)
+        rows = [
+            # Palmetto solo-entrada (dir1, sin dir2): arrival valido, departure None
+            (222451671, 1, "2026-04-01 08:00:00", 111, 1, "(P) Porteria", 1, 1, 1, "Palmetto", "palmetto"),
+            # Palmetto solo-salida (dir2, sin dir1): arrival None (no infla tardanzas), departure valido
+            (222451671, 2, "2026-04-01 17:00:00", 333, 1, "(P) Porteria", 1, 1, 2, "Palmetto", "palmetto"),
+            # Teq un solo swipe: excluido de ambos
+            (225088590, 3, "2026-04-01 09:00:00", 222, 1, "Teq .125 P1", 1, 1, None, "Tequendama", "teq"),
+        ]
+        self.conn.executemany(
+            "INSERT INTO events (device_id, idx, timestamp, card, door, door_name, "
+            "granted, reason, direction, sede, source) VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
+        self.conn.commit()
+
+    def test_entry_only_has_arrival_no_departure(self):
+        ad = kpis.arrival_departure(kpis.fetch_rows(self.conn, {}))
+        self.assertEqual(ad["Palmetto"]["arrival"], "08:00")   # solo la de 08:00 (la solo-salida no da arrival)
+        self.assertEqual(ad["Palmetto"]["departure"], "17:00") # solo la de 17:00 (la solo-entrada no da departure)
+
+    def test_teq_single_swipe_excluded(self):
+        ad = kpis.arrival_departure(kpis.fetch_rows(self.conn, {}))
+        self.assertIsNone(ad["Tequendama"]["arrival"])
+        self.assertIsNone(ad["Tequendama"]["departure"])
+
+    def test_exit_only_not_counted_as_late(self):
+        late = kpis.late_arrivals(kpis.fetch_rows(self.conn, {}), "08:00")
+        # solo la solo-entrada (08:00) cuenta como llegada; no es tarde; la solo-salida no cuenta
+        self.assertEqual(late["Palmetto"]["total"], 1)
+        self.assertEqual(late["Palmetto"]["late"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

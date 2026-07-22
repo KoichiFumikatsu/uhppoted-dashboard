@@ -31,7 +31,6 @@ def fetch_rows(conn, filters):
 
 
 def _first_last_per_group(rows):
-    # agrupa por (sede, card, dia) -> (arrival_secs, departure_secs)
     groups = defaultdict(list)
     for r in rows:
         key = (r["sede"], r["card"], r["timestamp"][:10])
@@ -42,11 +41,11 @@ def _first_last_per_group(rows):
         if dirs:
             ins = [_secs(e["timestamp"]) for e in dirs if e["direction"] == 1]
             outs = [_secs(e["timestamp"]) for e in dirs if e["direction"] == 2]
-            arrival = min(ins) if ins else min(_secs(e["timestamp"]) for e in evs)
-            departure = max(outs) if outs else max(_secs(e["timestamp"]) for e in evs)
+            arrival = min(ins) if ins else None
+            departure = max(outs) if outs else None
         else:
-            times = [_secs(e["timestamp"]) for e in evs]
-            arrival, departure = min(times), max(times)
+            times = sorted(_secs(e["timestamp"]) for e in evs)
+            arrival, departure = (times[0], times[-1]) if times[0] != times[-1] else (None, None)
         out.append((sede, card, day, arrival, departure))
     return out
 
@@ -54,9 +53,13 @@ def _first_last_per_group(rows):
 def arrival_departure(rows):
     per = _first_last_per_group(rows)
     acc = defaultdict(lambda: {"arr": [], "dep": []})
+    for r in rows:
+        acc[r["sede"]]  # asegura que toda sede aparezca aunque no tenga pares validos
     for sede, card, day, a, d in per:
-        acc[sede]["arr"].append(a)
-        acc[sede]["dep"].append(d)
+        if a is not None:
+            acc[sede]["arr"].append(a)
+        if d is not None:
+            acc[sede]["dep"].append(d)
     res = {}
     for sede, v in acc.items():
         res[sede] = {
@@ -68,10 +71,13 @@ def arrival_departure(rows):
 
 
 def late_arrivals(rows, threshold="08:00"):
-    th = int(threshold[:2]) * 3600 + int(threshold[3:5]) * 60
+    hh, mm = threshold.split(":")[:2]
+    th = int(hh) * 3600 + int(mm) * 60
     per = _first_last_per_group(rows)
     acc = defaultdict(lambda: {"late": 0, "total": 0})
     for sede, card, day, a, d in per:
+        if a is None:
+            continue
         acc[sede]["total"] += 1
         if a > th:
             acc[sede]["late"] += 1

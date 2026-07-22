@@ -144,7 +144,11 @@ async function load(){
   if(k.attendance.series.length){
     const c6=card("Asistencia por día y sede",true);
     const leg=document.createElement("div");leg.className="legend";
-    sedes.forEach(s=>{leg.innerHTML+=`<span><span class="dot" style="background:${C[s]}"></span>${s}</span>`});
+    sedes.forEach(s=>{
+      const sp=document.createElement("span");
+      const dot=document.createElement("span"); dot.className="dot"; dot.style.background=C[s]||"#3987e5";
+      sp.appendChild(dot); sp.appendChild(document.createTextNode(s)); leg.appendChild(sp);
+    });
     c6.appendChild(leg);
     c6.appendChild(linesMulti(k.attendance.series,sedes));
     g.appendChild(c6);
