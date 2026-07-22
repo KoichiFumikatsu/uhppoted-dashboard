@@ -61,5 +61,43 @@ class TestCaps(unittest.TestCase):
         self.assertEqual(pa.required_cap("/schedules/"), "sesion")
 
 
+class TestUsers(unittest.TestCase):
+    def _base(self):
+        return pa.create_user({}, "koichi", "Koichi", "clave", ["*"])
+
+    def test_create_and_verify(self):
+        u = self._base()
+        self.assertIn("koichi", u)
+        self.assertNotIn("password", u["koichi"])          # nunca texto plano
+        self.assertTrue(pa.verify_password("clave", u["koichi"]["salt"], u["koichi"]["hash"]))
+        self.assertEqual(u["koichi"]["caps"], ["*"])
+
+    def test_create_duplicate_raises(self):
+        u = self._base()
+        with self.assertRaises(ValueError):
+            pa.create_user(u, "koichi", "x", "y", [])
+
+    def test_update_caps_and_password(self):
+        u = self._base()
+        pa.create_user(u, "gisella", "Gisella", "g1", ["ver_eventos"])
+        pa.update_user(u, "gisella", caps=["ver_eventos", "ver_dashboard"])
+        self.assertEqual(set(u["gisella"]["caps"]), {"ver_eventos", "ver_dashboard"})
+        pa.set_password(u, "gisella", "nueva")
+        self.assertTrue(pa.verify_password("nueva", u["gisella"]["salt"], u["gisella"]["hash"]))
+
+    def test_delete(self):
+        u = self._base()
+        pa.create_user(u, "tmp", "T", "x", [])
+        pa.delete_user(u, "tmp")
+        self.assertNotIn("tmp", u)
+
+    def test_public_users_hides_secrets(self):
+        u = self._base()
+        pub = pa.public_users(u)
+        self.assertEqual(pub[0]["username"], "koichi")
+        self.assertNotIn("hash", pub[0])
+        self.assertNotIn("salt", pub[0])
+
+
 if __name__ == "__main__":
     unittest.main()

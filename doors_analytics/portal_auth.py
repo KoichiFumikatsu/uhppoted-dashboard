@@ -75,3 +75,75 @@ def required_cap(uri):
         if u.startswith(prefix):
             return cap
     return "sesion"
+
+
+CAPS = [
+    ("ver_eventos", "Ver Eventos"),
+    ("ver_dashboard", "Ver Dashboard"),
+    ("editar_tarjetas", "Editar Tarjetas"),
+    ("editar_horarios", "Editar Horarios"),
+    ("publicar_acl", "Publicar ACL a controladores"),
+    ("gestionar_controladores", "Gestionar Controladores"),
+    ("abrir_puerta", "Abrir Puerta"),
+    ("gestionar_usuarios", "Gestionar Usuarios"),
+]
+_VALID_CAPS = {k for k, _ in CAPS} | {"*"}
+
+
+def load_users(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+def save_users(path, users):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(users, f, indent=1)
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _clean_caps(caps):
+    return [c for c in (caps or []) if c in _VALID_CAPS]
+
+
+def create_user(users, username, name, password, caps):
+    if username in users:
+        raise ValueError("usuario ya existe")
+    salt, h = hash_password(password)
+    users[username] = {"name": name, "salt": salt, "hash": h, "caps": _clean_caps(caps)}
+    return users
+
+
+def update_user(users, username, name=None, caps=None):
+    if username not in users:
+        raise ValueError("no existe")
+    if name is not None:
+        users[username]["name"] = name
+    if caps is not None:
+        users[username]["caps"] = _clean_caps(caps)
+    return users
+
+
+def set_password(users, username, password):
+    if username not in users:
+        raise ValueError("no existe")
+    salt, h = hash_password(password)
+    users[username]["salt"] = salt
+    users[username]["hash"] = h
+    return users
+
+
+def delete_user(users, username):
+    users.pop(username, None)
+    return users
+
+
+def public_users(users):
+    return [{"username": u, "name": d.get("name", u), "caps": d.get("caps", [])}
+            for u, d in sorted(users.items())]
