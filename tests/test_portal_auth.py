@@ -1,0 +1,65 @@
+import unittest
+from doors_analytics import portal_auth as pa
+
+
+class TestCrypto(unittest.TestCase):
+    def test_password_roundtrip(self):
+        salt, h = pa.hash_password("secreta123")
+        self.assertTrue(pa.verify_password("secreta123", salt, h))
+        self.assertFalse(pa.verify_password("otra", salt, h))
+
+    def test_password_salt_differs(self):
+        s1, h1 = pa.hash_password("x")
+        s2, h2 = pa.hash_password("x")
+        self.assertNotEqual(s1, s2)      # salt aleatorio
+        self.assertNotEqual(h1, h2)
+
+
+class TestToken(unittest.TestCase):
+    SECRET = b"0123456789abcdef0123456789abcdef"
+
+    def test_token_roundtrip(self):
+        t = pa.make_token("koichi", self.SECRET, now_ts=1000, ttl=100)
+        self.assertEqual(pa.verify_token(t, self.SECRET, now_ts=1050), "koichi")
+
+    def test_token_expired(self):
+        t = pa.make_token("koichi", self.SECRET, now_ts=1000, ttl=100)
+        self.assertIsNone(pa.verify_token(t, self.SECRET, now_ts=1200))  # vencido
+
+    def test_token_tampered(self):
+        t = pa.make_token("koichi", self.SECRET, now_ts=1000, ttl=100)
+        self.assertIsNone(pa.verify_token(t + "x", self.SECRET, now_ts=1050))
+        self.assertIsNone(pa.verify_token(t, b"otro-secreto-distinto-de-32bytes!", now_ts=1050))
+
+    def test_token_wrong_user_not_forgeable(self):
+        # cambiar el payload sin la firma correcta no valida
+        import base64
+        forged = base64.urlsafe_b64encode(b"admin|9999999999").decode() + ".deadbeef"
+        self.assertIsNone(pa.verify_token(forged, self.SECRET, now_ts=1050))
+
+
+class TestCaps(unittest.TestCase):
+    def test_star_grants_all(self):
+        self.assertTrue(pa.user_has_cap(["*"], "editar_tarjetas"))
+    def test_specific_cap(self):
+        self.assertTrue(pa.user_has_cap(["ver_eventos"], "ver_eventos"))
+        self.assertFalse(pa.user_has_cap(["ver_eventos"], "editar_tarjetas"))
+    def test_sesion_only_needs_login(self):
+        self.assertTrue(pa.user_has_cap(["ver_eventos"], "sesion"))
+        self.assertTrue(pa.user_has_cap([], "sesion"))
+
+    def test_required_cap_mapping(self):
+        self.assertEqual(pa.required_cap("/analytics/api/kpis?from=x"), "ver_dashboard")
+        self.assertEqual(pa.required_cap("/analytics/api/events?page=1"), "ver_eventos")
+        self.assertEqual(pa.required_cap("/analytics/dashboard.html"), "ver_dashboard")
+        self.assertEqual(pa.required_cap("/analytics/"), "ver_eventos")
+        self.assertEqual(pa.required_cap("/schedules/api/profile/7"), "editar_horarios")
+        self.assertEqual(pa.required_cap("/schedules/api/card/123"), "editar_tarjetas")
+        self.assertEqual(pa.required_cap("/schedules/api/publish"), "publicar_acl")
+        self.assertEqual(pa.required_cap("/schedules/api/controllers-refresh"), "gestionar_controladores")
+        self.assertEqual(pa.required_cap("/door-opener/open-door"), "abrir_puerta")
+        self.assertEqual(pa.required_cap("/schedules/"), "sesion")
+
+
+if __name__ == "__main__":
+    unittest.main()
