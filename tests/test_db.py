@@ -44,5 +44,17 @@ class TestUpsertEvents(unittest.TestCase):
         self.assertEqual(row, (17059974, 1, 1, "Palmetto"))
 
 
+# añadir a tests/test_db.py
+class TestCursors(unittest.TestCase):
+    def test_default_zero_then_set_get(self):
+        conn = sqlite3.connect(":memory:")
+        db.init_db(conn)
+        self.assertEqual(db.get_cursor(conn, "palmetto", 222451671), 0)
+        db.set_cursor(conn, "palmetto", 222451671, 42)
+        self.assertEqual(db.get_cursor(conn, "palmetto", 222451671), 42)
+        db.set_cursor(conn, "palmetto", 222451671, 99)  # actualiza
+        self.assertEqual(db.get_cursor(conn, "palmetto", 222451671), 99)
+
+
 if __name__ == "__main__":
     unittest.main()

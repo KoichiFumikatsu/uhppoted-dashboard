@@ -79,3 +79,22 @@ def upsert_events(conn, events):
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.commit()
     return len(rows)
+
+
+# añadir a doors_analytics/db.py
+def get_cursor(conn, source, device_id):
+    r = conn.execute(
+        "SELECT last_index FROM ingest_state WHERE source=? AND device_id=?",
+        (source, device_id)).fetchone()
+    return r[0] if r else 0
+
+
+def set_cursor(conn, source, device_id, last_index):
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    conn.execute(
+        "INSERT INTO ingest_state (source, device_id, last_index, last_run) "
+        "VALUES (?,?,?,?) "
+        "ON CONFLICT(source, device_id) DO UPDATE SET "
+        "last_index=excluded.last_index, last_run=excluded.last_run",
+        (source, device_id, last_index, now))
+    conn.commit()
