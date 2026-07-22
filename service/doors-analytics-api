@@ -1,0 +1,82 @@
+# service/doors-analytics-api
+#!/usr/bin/env python3
+import json
+import sqlite3
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+
+sys.path.insert(0, "/root/uhppoted-dashboard")
+from doors_analytics import config, queries
+
+
+def _conn():
+    c = sqlite3.connect(config.DB_PATH, timeout=5)
+    c.execute("PRAGMA busy_timeout=5000")
+    return c
+
+
+def _init_wal():
+    c = _conn()
+    try:
+        c.execute("PRAGMA journal_mode=WAL")
+    finally:
+        c.close()
+
+
+def _filters(qs):
+    def one(k):
+        v = qs.get(k, [None])[0]
+        return v if v not in ("", None) else None
+    return {k: one(k) for k in
+            ("from", "to", "device", "card", "door", "sede", "granted")}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, code, body, ctype="application/json", extra=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.wfile.write(body)
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        path = u.path.rstrip("/") or "/"
+        try:
+            if path == "/api/health":
+                self._send(200, json.dumps({"ok": True}))
+            elif path == "/api/events":
+                page = int((qs.get("page", ["1"])[0]) or 1)
+                page_size = int((qs.get("page_size", ["100"])[0]) or 100)
+                conn = _conn()
+                try:
+                    res = queries.query_events(conn, _filters(qs), page, page_size)
+                finally:
+                    conn.close()
+                self._send(200, json.dumps(res))
+            elif path == "/api/events.csv":
+                conn = _conn()
+                try:
+                    res = queries.query_events(conn, _filters(qs), 1, 100000)
+                finally:
+                    conn.close()
+                self._send(200, queries.events_to_csv(res["rows"]),
+                           "text/csv; charset=utf-8",
+                           {"Content-Disposition": "attachment; filename=eventos.csv"})
+            else:
+                self._send(404, json.dumps({"error": "not found"}))
+        except Exception as e:
+            self._send(500, json.dumps({"error": str(e)}))
+
+    def log_message(self, *a):
+        pass
+
+
+if __name__ == "__main__":
+    _init_wal()
+    HTTPServer(("127.0.0.1", 8447), Handler).serve_forever()
