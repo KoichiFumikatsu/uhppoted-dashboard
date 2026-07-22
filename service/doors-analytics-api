@@ -7,7 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, "/root/uhppoted-dashboard")
-from doors_analytics import config, queries
+from doors_analytics import config, queries, kpis
 
 
 def _conn():
@@ -68,6 +68,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, queries.events_to_csv(res["rows"]),
                            "text/csv; charset=utf-8",
                            {"Content-Disposition": "attachment; filename=eventos.csv"})
+            elif path == "/api/kpis":
+                lt = (qs.get("late_threshold", ["08:00"])[0]) or "08:00"
+                conn = _conn()
+                try:
+                    res = kpis.compute_kpis(conn, _filters(qs), lt)
+                finally:
+                    conn.close()
+                self._send(200, json.dumps(res))
             else:
                 self._send(404, json.dumps({"error": "not found"}))
         except Exception as e:
