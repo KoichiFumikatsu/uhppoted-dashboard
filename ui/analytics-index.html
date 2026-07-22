@@ -66,16 +66,27 @@ function params(extra){
   return p.toString();
 }
 const DIR = {1:"Entra", 2:"Sale"};
+// Celdas via textContent (NO innerHTML): los datos (nombre de tarjeta, etiqueta de
+// puerta) pueden venir de fuentes externas no confiables -> textContent evita XSS
+// almacenado. El mismo origen frontea /door-opener, asi que un XSS aca seria grave.
+function cell(text, cls){
+  const td = document.createElement("td");
+  td.textContent = (text === null || text === undefined) ? "" : String(text);
+  if (cls) td.className = cls;
+  return td;
+}
 async function load(){
   const res = await fetch(`${API}/events?${params({page, page_size:50})}`);
   const d = await res.json();
   const tb = document.getElementById("rows"); tb.innerHTML = "";
   for (const r of d.rows){
     const tr = document.createElement("tr");
-    const g = r.granted ? "Concedido" : "<span class='deny'>Negado</span>";
-    tr.innerHTML = `<td>${r.timestamp||""}</td><td>${r.sede||""}</td>`
-      + `<td>${r.door_name||r.door||""}</td><td>${r.card||""}</td>`
-      + `<td>${r.card_name||""}</td><td>${g}</td><td>${DIR[r.direction]||""}</td>`;
+    tr.append(
+      cell(r.timestamp), cell(r.sede),
+      cell(r.door_name || r.door), cell(r.card), cell(r.card_name),
+      r.granted ? cell("Concedido") : cell("Negado", "deny"),
+      cell(DIR[r.direction] || "")
+    );
     tb.appendChild(tr);
   }
   document.getElementById("count").textContent = d.total + " eventos";
