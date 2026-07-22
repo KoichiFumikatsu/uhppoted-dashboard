@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Controladores — AZC Accesos</title>
+<link rel="stylesheet" href="/portal/shell.css">
+<style>
+  body{margin:0;background:#0f1720;color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+  .head{padding:14px 20px;border-bottom:1px solid #2a3a49;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .head b{font-size:16px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#182430;border:1px solid #2a3a49;color:#9fb0c0}
+  button{background:#3987e5;color:#04121f;border:none;padding:6px 11px;border-radius:6px;font-weight:600;cursor:pointer;font-size:12px}
+  button.sec{background:#182430;color:#e6edf3;border:1px solid #2a3a49}
+  button:disabled{opacity:.5;cursor:wait}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:18px 20px}
+  .card{background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:16px}
+  .card h3{margin:0 0 4px;font-size:15px;display:flex;align-items:center;gap:8px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:#8a97a5}
+  .dot.on{background:#0ca30c}.dot.off{background:#d03b3b}
+  .meta{color:#9fb0c0;font-size:12px;line-height:1.7;margin:8px 0}
+  .meta b{color:#e6edf3;font-weight:600}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  input,select{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:12px}
+  .msg{font-size:11px;color:#9fb0c0;min-height:14px;margin-top:6px}
+  .warn{color:#fab219}
+</style>
+</head>
+<body>
+<div class="head">
+  <b>Controladores</b>
+  <span class="badge" id="upd">—</span>
+  <button class="sec" id="refresh">Actualizar estado (1×1)</button>
+</div>
+<div class="grid" id="grid"></div>
+
+<link rel="stylesheet" href="/portal/shell.css">
+<script src="/portal/shell.js"></script>
+<script>
+const API="/schedules/api";
+function el(id){return document.getElementById(id);}
+let POLL=null;
+
+async function load(){
+  const r=await fetch(`${API}/controllers-status`);
+  if(!r.ok){ if(r.status===401) location.href="/portal/login.html"; el("grid").innerHTML="<p style='padding:20px;color:#9fb0c0'>Sin acceso a controladores.</p>"; return; }
+  const d=await r.json();
+  el("upd").textContent = d.updated ? ("actualizado "+d.updated) : "sin datos — pulsá Actualizar";
+  el("refresh").disabled = !!d.refreshing;
+  if(d.refreshing && !POLL){ POLL=setInterval(load,2500); }
+  if(!d.refreshing && POLL){ clearInterval(POLL); POLL=null; }
+  const g=el("grid"); g.innerHTML="";
+  for(const c of (d.controllers||[])){
+    const card=document.createElement("div"); card.className="card";
+    const on = c.online===true;
+    card.innerHTML =
+      `<h3><span class="dot ${on?'on':(c.online===false?'off':'')}"></span><span class="cname">${escapeHtml(c.name||c.serial)}</span></h3>`+
+      `<div class="meta">Serial <b>${c.serial}</b> · ${on?'en línea':(c.pending?'pendiente':'sin respuesta')}<br>`+
+      `IP <b>${c.ip||'—'}</b> · FW <b>${c.firmware||'—'}</b> · Tarjetas <b>${c.cards!=null?c.cards:'—'}</b></div>`;
+    // acciones
+    const row1=document.createElement("div"); row1.className="row";
+    const nInput=document.createElement("input"); nInput.value=c.name||""; nInput.style.minWidth="130px"; nInput.placeholder="nombre";
+    const bName=document.createElement("button"); bName.className="sec"; bName.textContent="Renombrar";
+    bName.onclick=()=>action(card, `${API}/controllers/${c.serial}/name`, "PUT", {name:nInput.value.trim()}, "Nombre actualizado", load);
+    row1.appendChild(nInput); row1.appendChild(bName);
+    const bTime=document.createElement("button"); bTime.className="sec"; bTime.textContent="Sincronizar reloj";
+    bTime.onclick=()=>action(card, `${API}/controllers/${c.serial}/set-time`, "POST", {}, "Reloj sincronizado", null);
+    row1.appendChild(bTime);
+    card.appendChild(row1);
+    // abrir puerta
+    const row2=document.createElement("div"); row2.className="row";
+    const sel=document.createElement("select"); ["1","2","3","4"].forEach(d=>{const o=document.createElement("option");o.value=d;o.textContent="Puerta "+d;sel.appendChild(o)});
+    const bOpen=document.createElement("button"); bOpen.textContent="Abrir puerta";
+    bOpen.onclick=()=>{ if(confirm(`¿Abrir puerta ${sel.value} de ${c.name||c.serial}?`)) action(card, `${API}/controllers/${c.serial}/open-door`, "POST", {door:sel.value}, "Puerta abierta", null); };
+    row2.appendChild(sel); row2.appendChild(bOpen);
+    card.appendChild(row2);
+    const msg=document.createElement("div"); msg.className="msg"; card.appendChild(msg);
+    g.appendChild(card);
+  }
+}
+function escapeHtml(s){const d=document.createElement("div");d.textContent=String(s==null?"":s);return d.innerHTML;}
+async function action(card, url, method, body, okMsg, then){
+  const msg=card.querySelector(".msg"); msg.className="msg"; msg.textContent="…";
+  try{
+    const r=await fetch(url,{method,body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok){ msg.textContent=okMsg; if(then) then(); }
+    else{ msg.className="msg warn"; msg.textContent="Error: "+(d.error||r.status); }
+  }catch(e){ msg.className="msg warn"; msg.textContent="Error de red"; }
+}
+el("refresh").onclick=async()=>{ el("refresh").disabled=true; await fetch(`${API}/controllers-refresh`,{method:"POST"}); load(); };
+load();
+</script>
+</body>
+</html>
