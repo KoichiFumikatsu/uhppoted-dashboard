@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+import json
+import os
+import sqlite3
+import sys
+
+sys.path.insert(0, "/root/uhppoted-dashboard")
+from doors_analytics import config, db, ingest
+
+try:
+    os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(config.DB_PATH)
+    db.init_db(conn)
+    counts = ingest.run_once(
+        conn, config.EVENTS_JSON, config.TEQ_JSON,
+        config.PALMETTO_SERIAL, config.TEQ_SERIALS, config.SINCE_DATE)
+    conn.close()
+    print("doors-ingest:", counts)
+except (json.JSONDecodeError, ValueError) as e:
+    print("doors-ingest: skipped cycle (transient read error):", e, file=sys.stderr)
+    sys.exit(0)
