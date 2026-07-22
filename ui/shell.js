@@ -7,6 +7,7 @@
     { cap: "ver_eventos",             href: "/analytics/",              label: "Eventos" },
     { cap: "ver_dashboard",           href: "/analytics/dashboard.html", label: "Dashboard" },
     { cap: "editar_tarjetas",         href: "/portal/cards.html",       label: "Tarjetas" },
+    { cap: "editar_tarjetas",         href: "/portal/groups.html",      label: "Grupos" },
     { cap: "editar_horarios",         href: "/schedules/",              label: "Horarios" },
     { cap: "gestionar_controladores", href: "/portal/controllers.html",  label: "Controladores" },
     { cap: "publicar_acl",            href: "/schedules/",              label: "Publicar" },

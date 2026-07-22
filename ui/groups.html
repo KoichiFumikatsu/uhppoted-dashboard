@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Grupos — AZC Accesos</title>
+<link rel="stylesheet" href="/portal/shell.css">
+<style>
+  body{margin:0;background:#0f1720;color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+  .head{padding:14px 20px;border-bottom:1px solid #2a3a49;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .head b{font-size:16px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#182430;border:1px solid #2a3a49;color:#9fb0c0}
+  .note{color:#9fb0c0;font-size:12px;padding:8px 20px;background:#141d27;border-bottom:1px solid #2a3a49}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:18px 20px}
+  .card{background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:16px}
+  .card h3{margin:0 0 8px;font-size:15px}
+  .meta{color:#9fb0c0;font-size:12px;margin-bottom:8px}
+  .meta b{color:#e6edf3;font-weight:600}
+  .doors{display:flex;flex-wrap:wrap;gap:6px}
+  .door{font-size:11px;padding:3px 8px;border-radius:10px;background:#0f1720;border:1px solid #2a3a49;color:#9fb0c0}
+  .door.none{opacity:.6;font-style:italic}
+</style>
+</head>
+<body>
+<div class="head"><b>Grupos</b><span class="badge" id="count">—</span></div>
+<div class="note">Vista de grupos: qué puertas concede cada grupo y cuántas tarjetas lo tienen. Editar grupos/puertas por ahora se hace en el Panel; traer la edición al portal es un paso siguiente.</div>
+<div class="grid" id="grid"></div>
+
+<link rel="stylesheet" href="/portal/shell.css">
+<script src="/portal/shell.js"></script>
+<script>
+const API="/schedules/api";
+(async function(){
+  const r=await fetch(`${API}/groups`);
+  if(!r.ok){ if(r.status===401) location.href="/portal/login.html"; document.getElementById("grid").innerHTML="<p style='padding:20px;color:#9fb0c0'>Sin acceso a grupos.</p>"; return; }
+  const groups=(await r.json()).groups||[];
+  document.getElementById("count").textContent=groups.length+" grupos";
+  const g=document.getElementById("grid");
+  for(const gr of groups){
+    const c=document.createElement("div"); c.className="card";
+    const h=document.createElement("h3"); h.textContent=gr.name||gr.oid; c.appendChild(h);
+    const m=document.createElement("div"); m.className="meta";
+    m.innerHTML="Tarjetas: <b>"+gr.cards+"</b>"; c.appendChild(m);
+    const dd=document.createElement("div"); dd.className="doors";
+    if(gr.doors && gr.doors.length){
+      gr.doors.forEach(d=>{ const s=document.createElement("span"); s.className="door"; s.textContent=d; dd.appendChild(s); });
+    } else { const s=document.createElement("span"); s.className="door none"; s.textContent="sin puertas"; dd.appendChild(s); }
+    c.appendChild(dd); g.appendChild(c);
+  }
+})();
+</script>
+</body>
+</html>

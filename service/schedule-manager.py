@@ -367,6 +367,26 @@ def _role_profiles():
     return rp
 
 
+def api_groups():
+    groups = _groups()  # {OID: {name, doors:set}}
+    counts = {}
+    cdata = _load_json(CARDS_JSON, {})
+    for c in (cdata.get('cards', []) if isinstance(cdata, dict) else []):
+        for g in (c.get('groups') or []):
+            counts[g] = counts.get(g, 0) + 1
+    ddata = _load_json(DOORS_JSON, {})
+    dmap = {}
+    for d in (ddata.get('doors', []) if isinstance(ddata, dict) else []):
+        dmap[d.get('OID')] = d.get('name', d.get('OID'))
+    out = []
+    for oid, g in groups.items():
+        out.append({'oid': oid, 'name': g['name'],
+                    'doors': sorted(dmap.get(d, d) for d in g['doors']),
+                    'cards': counts.get(oid, 0)})
+    out.sort(key=lambda x: x['name'])
+    return 200, {'groups': out}
+
+
 def _cell_for_door(group_oids, door_oid, groups, role_profiles):
     granting = [g for g in group_oids if door_oid in groups.get(g, {}).get('doors', set())]
     if not granting:
@@ -742,6 +762,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(*api_cards_list())
         if p == '/api/doors':
             return self._json(*api_doors())
+        if p == '/api/groups':
+            return self._json(*api_groups())
         if p == '/api/teq-events':
             return self._json(*api_teq_events())
         if p == '/api/controllers-status':
