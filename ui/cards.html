@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Tarjetas — AZC Accesos</title>
+<link rel="stylesheet" href="/portal/shell.css">
+<style>
+  body{margin:0;background:#0f1720;color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+  .head{padding:14px 20px;border-bottom:1px solid #2a3a49;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .head b{font-size:16px}
+  .head input{background:#182430;border:1px solid #2a3a49;color:#e6edf3;padding:8px 10px;border-radius:6px;font-size:13px;min-width:200px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#182430;border:1px solid #2a3a49;color:#9fb0c0}
+  .note{color:#9fb0c0;font-size:12px;padding:8px 20px;background:#141d27;border-bottom:1px solid #2a3a49}
+  .wrap{padding:0 20px 24px;overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #2a3a49;white-space:nowrap}
+  th{color:#9fb0c0;font-weight:600}
+  tr:hover td{background:#141d27}
+  button{background:#3987e5;color:#04121f;border:none;padding:6px 12px;border-radius:6px;font-weight:600;cursor:pointer;font-size:12px}
+  button.sec{background:#182430;color:#e6edf3;border:1px solid #2a3a49}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:2000}
+  .modal .box{background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:20px;width:360px}
+  .modal h3{margin:0 0 12px;font-size:15px}
+  .modal label{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#9fb0c0;margin:8px 0}
+  .modal input,.modal select{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:13px}
+  .doors{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+  .doors label{flex-direction:column;gap:4px;color:#9fb0c0;font-size:12px}
+  .warn{color:#fab219;font-size:12px;margin-top:8px;min-height:16px}
+  .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+</style>
+</head>
+<body>
+<div class="head">
+  <b>Tarjetas</b>
+  <span class="badge" id="count">—</span>
+  <input id="search" placeholder="Buscar por nº de tarjeta…" inputmode="numeric">
+  <span class="badge">Permisos por puerta = Sede Palmetto</span>
+</div>
+<div class="note">Editar permisos por puerta escribe directo al controlador de Palmetto. Poner una puerta en <b>N</b> revoca acceso; si esa puerta comparte lector de entrada/salida, puede <b>encerrar</b> a la persona. Para Tequendama usar “Publicar”.</div>
+<div class="wrap">
+  <table>
+    <thead><tr><th>Tarjeta</th><th>Desde</th><th>Hasta</th><th>Grupos</th><th></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<div class="modal" id="modal">
+  <div class="box">
+    <h3>Tarjeta <span id="m-card"></span></h3>
+    <label>Válida desde <input type="date" id="m-from"></label>
+    <label>Válida hasta <input type="date" id="m-to"></label>
+    <div style="color:#9fb0c0;font-size:12px;margin-top:6px">Acceso por puerta (Palmetto)</div>
+    <div class="doors" id="m-doors"></div>
+    <div class="warn" id="m-warn"></div>
+    <div class="actions">
+      <button class="sec" id="m-cancel">Cancelar</button>
+      <button id="m-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<link rel="stylesheet" href="/portal/shell.css">
+<script src="/portal/shell.js"></script>
+<script>
+const API = "/schedules/api";
+let ALL = [];
+const DOORS = ["1","2","3","4"];
+const DOORNAMES = {"1":"P1 (Portería)","2":"P2","3":"P3","4":"P4"};
+function el(id){return document.getElementById(id);}
+
+async function loadList(){
+  const r = await fetch(`${API}/cards-list`);
+  if(!r.ok){ if(r.status===401) location.href="/portal/login.html"; el("count").textContent="sin acceso"; return; }
+  ALL = (await r.json()).cards || [];
+  render();
+}
+function render(){
+  const q = el("search").value.trim();
+  const rows = q ? ALL.filter(c => String(c.card).includes(q)) : ALL;
+  el("count").textContent = rows.length + " / " + ALL.length + " tarjetas";
+  const tb = el("rows"); tb.innerHTML = "";
+  for(const c of rows.slice(0,500)){
+    const tr = document.createElement("tr");
+    const g = (c.groups||[]).length;
+    [String(c.card||""), c.from||"", c.to||"", g ? (g+" grupo"+(g>1?"s":"")) : "—"].forEach(v=>{
+      const td=document.createElement("td"); td.textContent=v; tr.appendChild(td);
+    });
+    const td=document.createElement("td");
+    const b=document.createElement("button"); b.className="sec"; b.textContent="Permisos";
+    b.onclick=()=>openCard(c.card); td.appendChild(b); tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+}
+el("search").oninput = render;
+
+let CUR = null;
+async function openCard(card){
+  const r = await fetch(`${API}/card/${card}`);
+  if(!r.ok){ alert("No se pudo leer la tarjeta en el controlador."); return; }
+  CUR = await r.json(); CUR.card = card;
+  el("m-card").textContent = card;
+  el("m-from").value = (CUR.from||"").slice(0,10);
+  el("m-to").value = (CUR.to||"").slice(0,10);
+  const dd = el("m-doors"); dd.innerHTML="";
+  for(const d of DOORS){
+    const cur = (CUR.doors && CUR.doors[d] != null) ? String(CUR.doors[d]) : "N";
+    const val = (cur==="Y"||cur==="N") ? cur : "Y"; // profile-id -> tratamos como Y en v1
+    const l=document.createElement("label");
+    const sel=document.createElement("select"); sel.dataset.door=d;
+    for(const opt of [["Y","Concede"],["N","Niega"]]){
+      const o=document.createElement("option"); o.value=opt[0]; o.textContent=opt[1];
+      if(opt[0]===val) o.selected=true; sel.appendChild(o);
+    }
+    l.appendChild(document.createTextNode(DOORNAMES[d])); l.appendChild(sel); dd.appendChild(l);
+  }
+  el("m-warn").textContent="";
+  el("modal").style.display="flex";
+}
+el("m-cancel").onclick=()=>{ el("modal").style.display="none"; };
+el("m-doors").onchange=()=>{
+  const anyN = [...el("m-doors").querySelectorAll("select")].some(s=>s.value==="N");
+  el("m-warn").textContent = anyN ? "⚠ Vas a NEGAR al menos una puerta. Verificá que no encierre a la persona." : "";
+};
+el("m-save").onclick=async()=>{
+  const doors={};
+  el("m-doors").querySelectorAll("select").forEach(s=>{ doors[s.dataset.door]=s.value; });
+  const body={ from: el("m-from").value, to: el("m-to").value, doors };
+  const r=await fetch(`${API}/card/${CUR.card}`,{method:"PUT",body:JSON.stringify(body)});
+  if(r.ok){ el("modal").style.display="none"; }
+  else{ const e=await r.json().catch(()=>({})); alert("Error: "+(e.error||r.status)); }
+};
+loadList();
+</script>
+</body>
+</html>

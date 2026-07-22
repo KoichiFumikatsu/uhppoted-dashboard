@@ -1,0 +1,26 @@
+/* shell.css — barra de navegación unificada "AZC Accesos" (una sola app) */
+:root{
+  --azc-bg:#0f1720; --azc-panel:#182430; --azc-line:#2a3a49;
+  --azc-ink:#e6edf3; --azc-mut:#9fb0c0; --azc-accent:#3987e5;
+}
+.azc-shell{
+  position:sticky; top:0; z-index:1000;
+  display:flex; align-items:center; gap:6px;
+  background:#0c1218; border-bottom:1px solid var(--azc-line);
+  padding:0 16px; height:48px;
+  font-family:system-ui,Segoe UI,Roboto,sans-serif;
+}
+.azc-shell .azc-brand{
+  color:var(--azc-ink); font-weight:700; font-size:15px; text-decoration:none;
+  margin-right:10px; white-space:nowrap;
+}
+.azc-shell .azc-nav{ display:flex; gap:2px; flex:1; overflow-x:auto; }
+.azc-shell .azc-tab{
+  color:var(--azc-mut); text-decoration:none; font-size:13px; font-weight:500;
+  padding:14px 12px; white-space:nowrap; border-bottom:2px solid transparent;
+}
+.azc-shell .azc-tab:hover{ color:var(--azc-ink); }
+.azc-shell .azc-tab.active{ color:var(--azc-ink); border-bottom-color:var(--azc-accent); }
+.azc-shell .azc-user{ color:var(--azc-mut); font-size:12px; white-space:nowrap; display:flex; align-items:center; gap:10px; }
+.azc-shell .azc-user a{ color:var(--azc-mut); text-decoration:none; border:1px solid var(--azc-line); padding:4px 9px; border-radius:6px; }
+.azc-shell .azc-user a:hover{ color:var(--azc-ink); border-color:var(--azc-accent); }
