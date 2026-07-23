@@ -94,6 +94,32 @@ def _run(args, timeout=8):
         return 124, '', 'timeout'
 
 
+_HW_ERR = ('error', 'invalid', 'usage', 'false')
+_HW_CONF = '/etc/uhppoted/uhppoted.conf'
+
+
+def _run_hw(serial, cmd_args, want_true=False, tries=3):
+    """Comando de ESCRITURA a un controlador. Dos cosas que _run pelado no hacia:
+    (1) pasa --config, sin el cual Palmetto anda por broadcast pero Teq (Tailscale)
+        es inalcanzable; (2) valida la SALIDA, porque uhppote-cli devuelve rc=0 hasta
+        con comando o parametro invalido (asi el bug de 'open-door' devolvia 200 sin
+        abrir). warmup por get-device: el 1er paquete a Teq tras idle se cae."""
+    text = ''
+    for _ in range(tries):
+        _run(['--config', _HW_CONF, '--timeout', '3s', 'get-device', str(serial)], timeout=6)
+        rc, out, err = _run(['--config', _HW_CONF, '--timeout', '6s'] + cmd_args, timeout=12)
+        text = (out + ' ' + err).strip()
+        low = text.lower()
+        if any(t in low for t in _HW_ERR):
+            return False, text            # error deterministico: no reintentar
+        if want_true:
+            if 'true' in low:
+                return True, text
+            continue                       # sin 'true' ni error: reintentar (warmup Teq)
+        return True, text
+    return False, text or 'sin respuesta'
+
+
 _WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 
@@ -442,19 +468,17 @@ def api_set_door_config(oid, body):
             return 400, {'error': 'retardo invalido'}
         if not 1 <= delay <= 60:
             return 400, {'error': 'el retardo debe estar entre 1 y 60 segundos'}
-        rc, out, err = _run(['--timeout', '6s', 'set-door-delay', serial, str(door), str(delay)],
-                            timeout=10)
-        if rc != 0:
-            return 500, {'error': err or out or 'cli failed'}
+        ok, text = _run_hw(serial, ['set-door-delay', serial, str(door), str(delay)])
+        if not ok:
+            return 500, {'error': text or 'cli failed'}
         applied['delay'] = delay
     if 'mode' in body:
         mode = str(body['mode'])
         if mode not in _DOOR_MODES:
             return 400, {'error': 'modo invalido: %s' % mode}
-        rc, out, err = _run(['--timeout', '6s', 'set-door-control', serial, str(door), mode],
-                            timeout=10)
-        if rc != 0:
-            return 500, {'error': err or out or 'cli failed'}
+        ok, text = _run_hw(serial, ['set-door-control', serial, str(door), mode])
+        if not ok:
+            return 500, {'error': text or 'cli failed'}
         applied['mode'] = mode
     if not applied:
         return 400, {'error': 'nada que cambiar'}
@@ -1398,10 +1422,10 @@ def api_set_time(serial):
     if serial not in SERIALS:
         return 404, {'error': 'unknown controller'}
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    rc, out, err = _run(['--timeout', '6s', 'set-time', serial, now], timeout=10)
-    if rc != 0:
-        return 500, {'error': err or out or 'cli failed'}
-    return 200, {'ok': True, 'time': now, 'result': out.strip()}
+    ok, text = _run_hw(serial, ['set-time', serial, now])
+    if not ok:
+        return 500, {'error': text or 'cli failed'}
+    return 200, {'ok': True, 'time': now, 'result': text}
 
 
 def api_open_door(serial, body):
@@ -1413,10 +1437,10 @@ def api_open_door(serial, body):
     mapped = {d['number'] for d in _controller_doors().get(serial, [])}
     if mapped and door not in mapped:
         return 400, {'error': 'esa puerta no existe en este controlador'}
-    rc, out, err = _run(['--timeout', '6s', 'open-door', serial, door], timeout=10)
-    if rc != 0:
-        return 500, {'error': err or out or 'cli failed'}
-    return 200, {'ok': True, 'serial': serial, 'door': door, 'result': out.strip()}
+    ok, text = _run_hw(serial, ['open', str(serial), door], want_true=True)
+    if not ok:
+        return 500, {'error': 'no se pudo abrir la puerta: %s' % (text or 'sin respuesta')}
+    return 200, {'ok': True, 'serial': serial, 'door': door, 'result': text}
 
 
 def api_controllers_refresh():
