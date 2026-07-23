@@ -66,11 +66,31 @@ CREATE TABLE IF NOT EXISTS portal_audit (
     result  TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_audit_ts ON portal_audit(ts);
+
+CREATE TABLE IF NOT EXISTS card_door_overrides (
+    card     INTEGER NOT NULL,
+    door_oid TEXT    NOT NULL,
+    value    TEXT    NOT NULL,
+    updated  TEXT,
+    PRIMARY KEY (card, door_oid)
+);
+CREATE INDEX IF NOT EXISTS ix_cdo_door ON card_door_overrides(door_oid);
 """
+
+# doors_meta nacio sin estas columnas: se agregan en caliente porque la tabla ya
+# existe en las bases desplegadas y CREATE TABLE IF NOT EXISTS no las agregaria.
+_ALTERS = [
+    ("doors_meta", "used", "INTEGER NOT NULL DEFAULT 1"),
+    ("doors_meta", "updated", "TEXT"),
+]
 
 
 def init_db(conn):
     conn.executescript(SCHEMA)
+    for table, column, decl in _ALTERS:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}
+        if column not in cols:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, decl))
     conn.commit()
 
 
@@ -100,6 +120,85 @@ def upsert_events(conn, events):
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.commit()
     return len(rows)
+
+
+def _now():
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---- overrides de puerta por tarjeta ----
+
+def card_overrides(conn, card=None):
+    """{card_str: {door_oid: value}}; con `card` devuelve solo esa tarjeta."""
+    if card is None:
+        rows = conn.execute("SELECT card, door_oid, value FROM card_door_overrides")
+    else:
+        rows = conn.execute(
+            "SELECT card, door_oid, value FROM card_door_overrides WHERE card=?",
+            (int(card),))
+    out = {}
+    for c, oid, v in rows:
+        out.setdefault(str(c), {})[oid] = v
+    return out
+
+
+def card_override_ts(conn, card):
+    r = conn.execute("SELECT MAX(updated) FROM card_door_overrides WHERE card=?",
+                     (int(card),)).fetchone()
+    return r[0] if r and r[0] else None
+
+
+def set_card_overrides(conn, card, doors):
+    """Reemplaza los overrides de la tarjeta en una transaccion (doors={oid: value})."""
+    with conn:
+        conn.execute("DELETE FROM card_door_overrides WHERE card=?", (int(card),))
+        if doors:
+            conn.executemany(
+                "INSERT INTO card_door_overrides (card, door_oid, value, updated) "
+                "VALUES (?,?,?,?)",
+                [(int(card), str(o), str(v), _now()) for o, v in doors.items()])
+
+
+def clear_card_overrides(conn, card):
+    with conn:
+        conn.execute("DELETE FROM card_door_overrides WHERE card=?", (int(card),))
+
+
+# ---- metadata de puerta (nombre propio del portal + marca de uso) ----
+
+def doors_meta(conn):
+    """{(device_id, door): {'label':..., 'used':bool}}"""
+    out = {}
+    for dev, dr, label, used in conn.execute(
+            "SELECT device_id, door, label, used FROM doors_meta"):
+        out[(int(dev), int(dr))] = {'label': label, 'used': bool(used)}
+    return out
+
+
+def set_door_meta(conn, device_id, door, label=None, used=None):
+    with conn:
+        conn.execute(
+            "INSERT INTO doors_meta (device_id, door, label, used, updated) "
+            "VALUES (?,?,?,COALESCE(?,1),?) "
+            "ON CONFLICT(device_id, door) DO UPDATE SET "
+            "label=COALESCE(excluded.label, doors_meta.label), "
+            "used=COALESCE(?, doors_meta.used), updated=excluded.updated",
+            (int(device_id), int(door), label, used, _now(), used))
+
+
+# ---- nombre propio del portal para controladores ----
+
+def controller_names(conn):
+    return {str(s): n for s, n in
+            conn.execute("SELECT serial, name FROM controllers WHERE name IS NOT NULL")}
+
+
+def set_controller_name(conn, serial, name):
+    with conn:
+        conn.execute(
+            "INSERT INTO controllers (serial, name, added) VALUES (?,?,?) "
+            "ON CONFLICT(serial) DO UPDATE SET name=excluded.name",
+            (int(serial), name, _now()))
 
 
 # añadir a doors_analytics/db.py

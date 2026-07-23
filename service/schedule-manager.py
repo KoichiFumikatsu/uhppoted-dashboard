@@ -44,6 +44,34 @@ DOOR_NAMES_JSON = Path('/var/uhppoted/analytics/door-names.json')
 WEEKDAYS_CLI = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 
+def _conn():
+    c = sqlite3.connect(_cfg.DB_PATH, timeout=10)
+    c.execute('PRAGMA busy_timeout=10000')
+    return c
+
+
+def _db_read(fn, default):
+    """Lectura tolerante: si la base no esta, el portal sigue sirviendo."""
+    try:
+        c = _conn()
+    except sqlite3.Error:
+        return default
+    try:
+        return fn(c)
+    except sqlite3.Error:
+        return default
+    finally:
+        c.close()
+
+
+def _db_write(fn):
+    c = _conn()
+    try:
+        return fn(c)
+    finally:
+        c.close()
+
+
 def _audit(actor, action, target, details, result):
     """Best-effort portal-action audit into doors.db. Never raises."""
     try:
@@ -305,14 +333,24 @@ def api_cards_list():
     return 200, {'cards': out}
 
 
+def _oid_by_dev_door():
+    m = {}
+    for c in _controllers():
+        for num, oid in c['doors'].items():
+            try:
+                m[(int(c['serial']), int(num))] = str(oid)
+            except ValueError:
+                pass
+    return m
+
+
 def _door_name_overrides():
-    if not DOOR_NAMES_JSON.exists():
-        return {}
-    try:
-        with open(DOOR_NAMES_JSON) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    """{door_oid: nombre} desde doors_meta. La tabla se llavea por (placa, puerta),
+    que es fisico y estable; el OID es interno del panel."""
+    meta = _db_read(_db.doors_meta, {})
+    oids = _oid_by_dev_door()
+    return {oids[k]: v['label'] for k, v in meta.items()
+            if v.get('label') and k in oids}
 
 
 def api_doors():
@@ -344,15 +382,13 @@ def api_set_door_name(oid, body):
     name = (body.get('name') or '').strip()
     if not name:
         return 400, {'error': 'nombre vacio'}
-    ov = _door_name_overrides()
-    ov[str(oid)] = name
+    owner = {v: k for k, v in _oid_by_dev_door().items()}
+    if str(oid) not in owner:
+        return 404, {'error': 'puerta desconocida'}
+    dev, door = owner[str(oid)]
     try:
-        DOOR_NAMES_JSON.parent.mkdir(parents=True, exist_ok=True)
-        tmp = str(DOOR_NAMES_JSON) + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(ov, f, indent=1, ensure_ascii=False)
-        Path(tmp).replace(DOOR_NAMES_JSON)
-    except Exception as e:
+        _db_write(lambda c: _db.set_door_meta(c, dev, door, label=name))
+    except sqlite3.Error as e:
         return 500, {'error': str(e)}
     return 200, {'ok': True, 'oid': str(oid), 'name': name}
 
@@ -524,7 +560,7 @@ def generate_acl_tsv(only_serial=None):
         to = cd.get('to', '2099-12-31')
         gids = cd.get('groups') or []
         pin = str(pins.get(str(cardnum), '') or '')
-        ov = (overrides.get(str(cardnum)) or {}).get('doors') or {}
+        ov = overrides.get(str(cardnum)) or {}
         cells = [str(ov.get(oid, _cell_for_door(gids, oid, groups, role_profiles)))
                  for _, oid in columns]
         rows.append([str(cardnum), pin, frm, to] + cells)
@@ -538,16 +574,14 @@ CARD_DOOR_OVERRIDES_JSON = Path('/var/uhppoted/analytics/card-door-overrides.jso
 PALMETTO = '222451671'
 
 
-def _card_overrides():
-    return _load_json(CARD_DOOR_OVERRIDES_JSON, {})
+def _card_overrides(card=None):
+    """{card: {door_oid: value}} — el reemplazo por tarjeta es transaccional,
+    a diferencia del read-modify-write del JSON anterior."""
+    return _db_read(lambda c: _db.card_overrides(c, card), {})
 
 
-def _save_card_overrides(ov):
-    CARD_DOOR_OVERRIDES_JSON.parent.mkdir(parents=True, exist_ok=True)
-    tmp = str(CARD_DOOR_OVERRIDES_JSON) + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(ov, f, indent=1, ensure_ascii=False)
-    Path(tmp).replace(CARD_DOOR_OVERRIDES_JSON)
+def _card_override_ts(card):
+    return _db_read(lambda c: _db.card_override_ts(c, card), None)
 
 
 def _last_publish_ts():
@@ -577,8 +611,8 @@ def api_card_doors(card):
     groups = _groups()
     role_profiles = _role_profiles()
     gids = cd.get('groups') or []
-    ent = _card_overrides().get(str(card)) or {}
-    ov = ent.get('doors') or {}
+    ov = _card_overrides(card).get(str(card)) or {}
+    ts = _card_override_ts(card)
     names = _door_oid_names()
     # nombre de placa resuelto aca: /api/controllers-names exige otra capacidad
     cnames = dict(CONTROLLERS_META)
@@ -597,7 +631,7 @@ def api_card_doors(card):
     pub = _last_publish_ts()
     return 200, {'card': str(card), 'from': cd.get('from'), 'to': cd.get('to'),
                  'groups': gids, 'doors': rows, 'last_publish': pub,
-                 'pending_publish': bool(ent.get('ts') and (pub is None or ent['ts'] > pub))}
+                 'pending_publish': bool(ts and (pub is None or ts > pub))}
 
 
 def api_put_card_doors(card, body):
@@ -624,12 +658,10 @@ def api_put_card_doors(card, body):
     if code != 200:
         return code, before
 
-    ov = _card_overrides()
-    if clean:
-        ov[str(card)] = {'doors': clean, 'ts': _now_str()}
-    else:
-        ov.pop(str(card), None)
-    _save_card_overrides(ov)
+    try:
+        _db_write(lambda c: _db.set_card_overrides(c, card, clean))
+    except sqlite3.Error as e:
+        return 500, {'error': 'no se pudo guardar el override: %s' % e}
 
     code, eff = api_card_doors(card)
     if code != 200:
@@ -755,7 +787,7 @@ def api_set_card_groups(card, body):
     except RuntimeError as e:
         return 502, {'error': str(e)}
     # el grupo cambia el efectivo: repropagar Palmetto (el panel no empuja solo)
-    keep = (_card_overrides().get(str(card)) or {}).get('doors') or {}
+    keep = _card_overrides(card).get(str(card)) or {}
     code, resp = api_put_card_doors(card, {'doors': keep})
     if code != 200:
         return 200, {'ok': True, 'card': str(card), 'palmetto_warning': resp.get('error')}
@@ -772,9 +804,10 @@ def api_delete_card(card):
         _panel_post('/cards', {'deleted': [cd['OID']]})
     except RuntimeError as e:
         return 502, {'error': str(e)}
-    ov = _card_overrides()
-    if ov.pop(str(card), None) is not None:
-        _save_card_overrides(ov)
+    try:
+        _db_write(lambda c: _db.clear_card_overrides(c, card))
+    except sqlite3.Error:
+        pass
     # revocacion inmediata en Palmetto; Teq sale al publicar (load-acl borra las no listadas)
     rc, out, err = _run(['--timeout', '6s', 'delete-card', PALMETTO, str(card)], timeout=10)
     return 200, {'ok': True, 'card': str(card), 'palmetto_deleted': rc == 0,
@@ -870,7 +903,7 @@ def api_bulk_card_doors(body):
         return 400, {'error': 'sin cambios'}
     results = []
     for card in cards:
-        cur = dict((_card_overrides().get(str(card)) or {}).get('doors') or {})
+        cur = dict(_card_overrides(card).get(str(card)) or {})
         for oid, v in changes.items():
             if str(v) == '':
                 cur.pop(str(oid), None)
@@ -1103,10 +1136,7 @@ SERIALS = {s for s, _ in CONTROLLERS_META}
 
 
 def _name_overrides():
-    try:
-        return json.loads(CONTROLLER_NAMES_JSON.read_text()) if CONTROLLER_NAMES_JSON.exists() else {}
-    except Exception:
-        return {}
+    return _db_read(_db.controller_names, {})
 
 
 def _apply_names(status):
@@ -1157,9 +1187,10 @@ def api_set_controller_name(serial, body):
     name = (body.get('name') or '').strip()
     if not name:
         return 400, {'error': 'name required'}
-    ov = _name_overrides()
-    ov[serial] = name
-    CONTROLLER_NAMES_JSON.write_text(json.dumps(ov, ensure_ascii=False))
+    try:
+        _db_write(lambda c: _db.set_controller_name(c, serial, name))
+    except sqlite3.Error as e:
+        return 500, {'error': str(e)}
     return 200, {'ok': True, 'serial': serial, 'name': name}
 
 
@@ -1327,7 +1358,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self._json(404, {'error': 'not found'})
 
 
+def _migrate_json_to_db():
+    """Carga unica de los stores JSON del portal a doors.db. Idempotente: cada
+    bloque corre solo si su tabla esta vacia. Los JSON quedan como respaldo."""
+    c = _conn()
+    try:
+        _db.init_db(c)
+        done = []
+        if not c.execute("SELECT 1 FROM card_door_overrides LIMIT 1").fetchone():
+            legacy = _load_json(CARD_DOOR_OVERRIDES_JSON, {})
+            n = 0
+            for card, ent in legacy.items():
+                doors = (ent or {}).get('doors') or {}
+                if doors:
+                    _db.set_card_overrides(c, card, doors)
+                    n += 1
+            if n:
+                done.append('card_door_overrides=%d tarjetas' % n)
+        if not c.execute("SELECT 1 FROM doors_meta LIMIT 1").fetchone():
+            legacy = _load_json(DOOR_NAMES_JSON, {})
+            owner = {v: k for k, v in _oid_by_dev_door().items()}
+            n = 0
+            for oid, name in legacy.items():
+                if str(oid) in owner:
+                    dev, door = owner[str(oid)]
+                    _db.set_door_meta(c, dev, door, label=name)
+                    n += 1
+            if n:
+                done.append('doors_meta=%d puertas' % n)
+        if not c.execute("SELECT 1 FROM controllers WHERE name IS NOT NULL LIMIT 1").fetchone():
+            legacy = _load_json(CONTROLLER_NAMES_JSON, {})
+            for serial, name in legacy.items():
+                _db.set_controller_name(c, serial, name)
+            if legacy:
+                done.append('controllers=%d nombres' % len(legacy))
+        if done:
+            print('migracion JSON -> doors.db: ' + ', '.join(done))
+    finally:
+        c.close()
+
+
 def main():
+    _migrate_json_to_db()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)
     httpd = http.server.HTTPServer(('127.0.0.1', PORT), Handler)
