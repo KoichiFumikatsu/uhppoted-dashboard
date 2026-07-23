@@ -378,12 +378,8 @@ def api_bulk_assign(body):
 
 
 def api_cards_list():
-    if not CARDS_JSON.exists():
-        return 200, {'cards': []}
-    with open(CARDS_JSON) as f:
-        data = json.load(f)
     out = []
-    for c in data.get('cards', []):
+    for c in _model_cards():
         # only basic info; per-door permissions queried on demand via /api/card/<n>
         out.append({
             'card': c.get('card'),
@@ -600,9 +596,8 @@ def _controllers():
     return out
 
 
-def _groups():
-    data = _load_json(GROUPS_JSON, {})
-    gs = data.get('groups', []) if isinstance(data, dict) else data
+def _groups_shape(gs):
+    """[{OID,name,doors}] -> {OID: {name, doors:set}} (forma que usan _cell_for_door/api)."""
     out = {}
     for x in gs:
         doors = x.get('doors', [])
@@ -610,6 +605,26 @@ def _groups():
             doors = [k for k, v in doors.items() if v]
         out[x.get('OID')] = {'name': x.get('name', ''), 'doors': set(doors)}
     return out
+
+
+# --- origen del MODELO (cards/groups). Hoy = JSON del panel; MODEL_SOURCE='db' lo lee
+#     de doors.db (espejo). El flip a 'db' es el corte de propiedad hacia el portal. ---
+MODEL_SOURCE = 'json'
+
+
+def _model_cards():
+    if MODEL_SOURCE == 'db':
+        return _db_read(_db.model_cards, [])
+    data = _load_json(CARDS_JSON, {})
+    return data.get('cards', []) if isinstance(data, dict) else data
+
+
+def _groups():
+    if MODEL_SOURCE == 'db':
+        return _groups_shape(_db_read(_db.model_groups, []))
+    data = _load_json(GROUPS_JSON, {})
+    gs = data.get('groups', []) if isinstance(data, dict) else data
+    return _groups_shape(gs)
 
 
 def _role_profiles():
@@ -623,8 +638,7 @@ def _role_profiles():
 def api_groups():
     groups = _groups()  # {OID: {name, doors:set}}
     counts = {}
-    cdata = _load_json(CARDS_JSON, {})
-    for c in (cdata.get('cards', []) if isinstance(cdata, dict) else []):
+    for c in _model_cards():
         for g in (c.get('groups') or []):
             counts[g] = counts.get(g, 0) + 1
     ddata = _load_json(DOORS_JSON, {})
@@ -661,8 +675,7 @@ def generate_acl_tsv(only_serial=None):
         controllers = [c for c in controllers if c['serial'] == str(only_serial)]
     groups = _groups()
     role_profiles = _role_profiles()
-    cards = _load_json(CARDS_JSON, {})
-    cards = cards.get('cards', []) if isinstance(cards, dict) else cards
+    cards = _model_cards()
 
     columns = []
     for c in controllers:
@@ -675,7 +688,9 @@ def generate_acl_tsv(only_serial=None):
     overrides = _card_overrides()
     header = ['Card Number', 'PIN', 'From', 'To'] + [lbl for lbl, _ in columns]
     rows = [header]
-    for cd in cards:
+    # orden canonico por numero de tarjeta -> TSV determinista, independiente del origen
+    # del modelo (JSON del panel o DB). load-acl indexa por tarjeta: el orden no afecta.
+    for cd in sorted(cards, key=lambda c: int(c.get('card') or 0)):
         cardnum = cd.get('card')
         if not cardnum:
             continue
@@ -726,9 +741,7 @@ def _door_oid_names():
 
 def api_card_doors(card):
     """Matriz de las 16 puertas para una tarjeta: valor del grupo, override y efectivo."""
-    cards = _load_json(CARDS_JSON, {})
-    cards = cards.get('cards', []) if isinstance(cards, dict) else cards
-    cd = next((c for c in cards if str(c.get('card')) == str(card)), None)
+    cd = next((c for c in _model_cards() if str(c.get('card')) == str(card)), None)
     if cd is None:
         return 404, {'error': 'la tarjeta no esta en el panel'}
     groups = _groups()
@@ -860,7 +873,12 @@ def _panel_post(path, payload):
         try:
             _, _, data = _panel_request('POST', path, payload,
                                         {'uhppoted-httpd-session': sess})
-            return json.loads(data.decode() or '{}')
+            out = json.loads(data.decode() or '{}')
+            # el panel escribio cards.json/groups.json sincronico antes de responder:
+            # refrescar la sombra en la DB para que no quede stale
+            if path in ('/cards', '/groups'):
+                _remirror()
+            return out
         except urllib.error.HTTPError as e:
             if e.code in (401, 403) and attempt == 1:
                 _panel_session['cookie'] = None
@@ -872,8 +890,7 @@ def _panel_post(path, payload):
 
 
 def _card_record(card):
-    data = _load_json(CARDS_JSON, {})
-    for c in (data.get('cards', []) if isinstance(data, dict) else data):
+    for c in _model_cards():
         if str(c.get('card')) == str(card):
             return c
     return None
@@ -978,9 +995,7 @@ def api_delete_card(card):
 
 
 def _group_card_count(goid):
-    data = _load_json(CARDS_JSON, {})
-    cards = data.get('cards', []) if isinstance(data, dict) else data
-    return sum(1 for c in cards if goid in (c.get('groups') or []))
+    return sum(1 for c in _model_cards() if goid in (c.get('groups') or []))
 
 
 def api_create_group(body):
@@ -1655,8 +1670,37 @@ def _migrate_json_to_db():
         c.close()
 
 
+def _mirror_model_to_db():
+    """Espejo cards.json/groups.json del panel -> model_cards/model_groups en doors.db.
+    Mientras el panel sea autoritativo (MODEL_SOURCE='json') esto solo alimenta la sombra;
+    al flip a 'db' la DB pasa a ser la fuente. Se re-corre tras cada escritura del modelo
+    (_remirror) para no quedar stale."""
+    cdata = _load_json(CARDS_JSON, {})
+    gdata = _load_json(GROUPS_JSON, {})
+    cards = cdata.get('cards', []) if isinstance(cdata, dict) else cdata
+    groups = gdata.get('groups', []) if isinstance(gdata, dict) else gdata
+    if not cards and not groups:
+        return
+    def _w(c):
+        _db.replace_model_cards(c, cards)
+        _db.replace_model_groups(c, groups)
+    _db_write(_w)
+
+
+def _remirror():
+    """Best-effort tras una escritura del modelo por la API del panel."""
+    try:
+        _mirror_model_to_db()
+    except Exception:
+        pass
+
+
 def main():
     _migrate_json_to_db()
+    try:
+        _mirror_model_to_db()
+    except Exception as e:
+        print('mirror modelo al arrancar fallo (no fatal):', e)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT, KEY)
     httpd = http.server.HTTPServer(('127.0.0.1', PORT), Handler)

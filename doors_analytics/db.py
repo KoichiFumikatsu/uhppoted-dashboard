@@ -76,6 +76,24 @@ CREATE TABLE IF NOT EXISTS card_door_overrides (
 );
 CREATE INDEX IF NOT EXISTS ix_cdo_door ON card_door_overrides(door_oid);
 
+-- Modelo de acceso (hoy propiedad del panel httpd: cards.json/groups.json). Espejo
+-- en la DB para que el portal sea su dueno y el panel se pueda apagar.
+CREATE TABLE IF NOT EXISTS model_cards (
+    card       INTEGER PRIMARY KEY,
+    name       TEXT,
+    valid_from TEXT,
+    valid_to   TEXT,
+    groups     TEXT,          -- JSON array de OIDs de grupo
+    oid        TEXT,
+    updated    TEXT
+);
+CREATE TABLE IF NOT EXISTS model_groups (
+    oid     TEXT PRIMARY KEY,
+    name    TEXT,
+    doors   TEXT,             -- JSON array de OIDs de puerta
+    updated TEXT
+);
+
 CREATE TABLE IF NOT EXISTS time_profiles (
     id       INTEGER PRIMARY KEY,   -- 2..254; MISMO significado en las 5 placas
     from_d   TEXT,
@@ -211,8 +229,61 @@ def set_controller_name(conn, serial, name):
             (int(serial), name, _now()))
 
 
-# ---- horarios (time profiles) — definicion central, misma para las 5 placas ----
+# ---- modelo de acceso: cards y groups (espejo/futuro dueno del panel) ----
 import json as _json
+
+
+def model_cards(conn):
+    """Lista con la misma forma que cards.json: {OID, card, name, from, to, groups[]}."""
+    out = []
+    for card, name, vf, vt, groups, oid in conn.execute(
+            "SELECT card, name, valid_from, valid_to, groups, oid FROM model_cards ORDER BY card"):
+        out.append({'OID': oid, 'card': card, 'name': name or '',
+                    'from': vf or '', 'to': vt or '',
+                    'groups': _json.loads(groups or '[]')})
+    return out
+
+
+def model_groups(conn):
+    """Lista con la forma de groups.json: {OID, name, doors[]}."""
+    out = []
+    for oid, name, doors in conn.execute(
+            "SELECT oid, name, doors FROM model_groups ORDER BY oid"):
+        out.append({'OID': oid, 'name': name or '', 'doors': _json.loads(doors or '[]')})
+    return out
+
+
+def replace_model_cards(conn, cards):
+    """Reemplaza TODO el modelo de tarjetas en una transaccion (espejo del panel).
+    cards: iterable de dicts forma cards.json."""
+    rows = []
+    for c in cards:
+        gids = c.get('groups') or []
+        if isinstance(gids, dict):
+            gids = [k for k, v in gids.items() if v]
+        rows.append((int(c['card']), c.get('name', ''), c.get('from', ''), c.get('to', ''),
+                     _json.dumps(list(gids)), c.get('OID', ''), _now()))
+    with conn:
+        conn.execute("DELETE FROM model_cards")
+        conn.executemany(
+            "INSERT INTO model_cards (card, name, valid_from, valid_to, groups, oid, updated) "
+            "VALUES (?,?,?,?,?,?,?)", rows)
+
+
+def replace_model_groups(conn, groups):
+    rows = []
+    for g in groups:
+        doors = g.get('doors') or []
+        if isinstance(doors, dict):
+            doors = [k for k, v in doors.items() if v]
+        rows.append((g.get('OID', ''), g.get('name', ''), _json.dumps(list(doors)), _now()))
+    with conn:
+        conn.execute("DELETE FROM model_groups")
+        conn.executemany(
+            "INSERT INTO model_groups (oid, name, doors, updated) VALUES (?,?,?,?)", rows)
+
+
+# ---- horarios (time profiles) — definicion central, misma para las 5 placas ----
 
 
 def _profile_row(r):
