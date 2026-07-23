@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Horarios — AZC Accesos</title>
+<link rel="stylesheet" href="/portal/shell.css">
+<style>
+  body{margin:0;background:#0f1720;color:#e6edf3;font-family:system-ui,Segoe UI,Roboto,sans-serif}
+  .head{padding:14px 20px;border-bottom:1px solid #2a3a49;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .head b{font-size:16px}
+  .badge{font-size:11px;padding:2px 8px;border-radius:10px;background:#182430;border:1px solid #2a3a49;color:#9fb0c0}
+  .note{color:#9fb0c0;font-size:12px;padding:8px 20px;background:#141d27;border-bottom:1px solid #2a3a49}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;padding:18px 20px}
+  .card{background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:16px}
+  .card h3{margin:0 0 6px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+  .meta{color:#9fb0c0;font-size:12px;line-height:1.7}
+  .meta b{color:#e6edf3;font-weight:600}
+  .days{display:flex;gap:4px;margin:8px 0}
+  .day{font-size:10px;width:26px;text-align:center;padding:3px 0;border-radius:5px;background:#0f1720;border:1px solid #2a3a49;color:#4d5f70}
+  .day.on{background:#12354f;border-color:#2f6d9e;color:#cfe6f7}
+  .seg{font-size:11px;padding:2px 7px;border-radius:9px;background:#0f1720;border:1px solid #2a3a49;color:#9fb0c0;margin-right:4px}
+  button{background:#3987e5;color:#04121f;border:none;padding:6px 11px;border-radius:6px;font-weight:600;cursor:pointer;font-size:12px}
+  button.sec{background:#182430;color:#e6edf3;border:1px solid #2a3a49}
+  input,select{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  .msg{font-size:11px;color:#9fb0c0;min-height:14px;margin-top:6px}
+  .warn{color:#fab219}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:2000}
+  .modal .box{background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:20px;width:460px;max-height:88vh;overflow-y:auto}
+  .modal h3{margin:0 0 12px;font-size:15px}
+  .modal label{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#9fb0c0;margin:8px 0;gap:10px}
+  .dpick{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+  .dpick label{flex-direction:column;gap:3px;font-size:11px}
+  .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+</style>
+</head>
+<body>
+<div class="head">
+  <b>Horarios</b><span class="badge" id="count">—</span>
+  <span class="badge">Sede Palmetto</span>
+  <button id="new">Nuevo horario</button>
+</div>
+<div class="note">Un horario define en qué días y franjas abre una tarjeta. Vive <b>dentro del controlador</b>, no en el panel. Se asigna a una puerta desde <b>Tarjetas</b>. Los ids van de 2 a 254. Hoy solo se gestionan los de <b>Palmetto</b>: el microservicio tiene ese controlador fijo.</div>
+<div class="grid" id="grid"></div>
+
+<div class="modal" id="modal">
+  <div class="box">
+    <h3>Horario <span id="m-id"></span></h3>
+    <label>Id (2..254) <input type="number" id="m-pid" min="2" max="254" style="width:90px"></label>
+    <label>Válido desde <input type="date" id="m-from"></label>
+    <label>Válido hasta <input type="date" id="m-to"></label>
+    <div style="color:#9fb0c0;font-size:12px;margin-top:6px">Días</div>
+    <div class="dpick" id="m-days"></div>
+    <div style="color:#9fb0c0;font-size:12px">Franjas (hasta 3)</div>
+    <div id="m-segs"></div>
+    <div class="msg warn" id="m-warn"></div>
+    <div class="actions">
+      <button class="sec" id="m-cancel">Cancelar</button>
+      <button id="m-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<link rel="stylesheet" href="/portal/shell.css">
+<script src="/portal/shell.js"></script>
+<script>
+const API="/schedules/api";
+const DAYS=[["Mon","Lu"],["Tue","Ma"],["Wed","Mi"],["Thu","Ju"],["Fri","Vi"],["Sat","Sa"],["Sun","Do"]];
+function el(id){return document.getElementById(id);}
+let CREATING=false;
+
+async function load(){
+  const r=await fetch(`${API}/profiles`);
+  if(!r.ok){ if(r.status===401) location.href="/portal/login.html";
+    el("grid").innerHTML="<p style='padding:20px;color:#9fb0c0'>Sin acceso a horarios.</p>"; return; }
+  const profiles=(await r.json()).profiles||[];
+  el("count").textContent=profiles.length+" horarios";
+  const g=el("grid"); g.innerHTML="";
+  if(!profiles.length){
+    g.innerHTML="<p style='padding:4px;color:#9fb0c0'>No hay horarios definidos. Con “Nuevo horario” creás el primero.</p>";
+  }
+  for(const p of profiles){
+    const c=document.createElement("div"); c.className="card";
+    const h=document.createElement("h3");
+    h.innerHTML=`<span>Horario ${p.id}</span>`+(p.linked?`<span class="seg">enlazado a ${p.linked}</span>`:"");
+    c.appendChild(h);
+    const m=document.createElement("div"); m.className="meta";
+    m.innerHTML=`Vigencia <b>${p.from||"—"}</b> → <b>${p.to||"—"}</b>`;
+    c.appendChild(m);
+    const dd=document.createElement("div"); dd.className="days";
+    for(const [k,lbl] of DAYS){
+      const s=document.createElement("span");
+      s.className="day"+((p.weekdays||[]).includes(k)?" on":""); s.textContent=lbl; dd.appendChild(s);
+    }
+    c.appendChild(dd);
+    const sg=document.createElement("div");
+    if((p.segments||[]).length) p.segments.forEach(s=>{
+      const e=document.createElement("span"); e.className="seg"; e.textContent=s[0]+"–"+s[1]; sg.appendChild(e);
+    }); else { const e=document.createElement("span"); e.className="seg"; e.textContent="sin franjas"; sg.appendChild(e); }
+    c.appendChild(sg);
+    const row=document.createElement("div"); row.className="row";
+    const be=document.createElement("button"); be.className="sec"; be.textContent="Editar";
+    be.onclick=()=>openProfile(p);
+    const bd=document.createElement("button"); bd.className="sec"; bd.textContent="Borrar";
+    bd.onclick=()=>del(c,p.id);
+    row.appendChild(be); row.appendChild(bd); c.appendChild(row);
+    const msg=document.createElement("div"); msg.className="msg"; c.appendChild(msg);
+    g.appendChild(c);
+  }
+}
+
+function segRow(a,b){
+  const d=document.createElement("div"); d.className="row";
+  const s=document.createElement("input"); s.type="time"; s.value=a||"";
+  const e=document.createElement("input"); e.type="time"; e.value=b||"";
+  d.appendChild(s); d.appendChild(document.createTextNode("→")); d.appendChild(e);
+  return d;
+}
+function openProfile(p){
+  CREATING=!p;
+  p=p||{id:"",from:"",to:"",weekdays:["Mon","Tue","Wed","Thu","Fri"],segments:[["08:00","18:00"]]};
+  el("m-id").textContent=CREATING?"nuevo":p.id;
+  el("m-pid").value=p.id||""; el("m-pid").disabled=!CREATING;
+  el("m-from").value=(p.from||"").slice(0,10);
+  el("m-to").value=(p.to||"").slice(0,10);
+  const dp=el("m-days"); dp.innerHTML="";
+  for(const [k,lbl] of DAYS){
+    const l=document.createElement("label");
+    const c=document.createElement("input"); c.type="checkbox"; c.value=k;
+    c.checked=(p.weekdays||[]).includes(k);
+    l.appendChild(document.createTextNode(lbl)); l.appendChild(c); dp.appendChild(l);
+  }
+  const sg=el("m-segs"); sg.innerHTML="";
+  for(let i=0;i<3;i++){ const s=(p.segments||[])[i]||[]; sg.appendChild(segRow(s[0],s[1])); }
+  el("m-warn").textContent="";
+  el("modal").style.display="flex";
+}
+el("new").onclick=()=>openProfile(null);
+el("m-cancel").onclick=()=>{ el("modal").style.display="none"; };
+el("m-save").onclick=async()=>{
+  const pid=parseInt(el("m-pid").value,10);
+  if(!(pid>=2&&pid<=254)){ el("m-warn").textContent="El id debe estar entre 2 y 254."; return; }
+  const weekdays=[...el("m-days").querySelectorAll("input:checked")].map(c=>c.value);
+  if(!weekdays.length){ el("m-warn").textContent="Elegí al menos un día."; return; }
+  const segments=[];
+  for(const row of el("m-segs").children){
+    const [a,b]=[...row.querySelectorAll("input")].map(i=>i.value);
+    if(a&&b){ if(b<=a){ el("m-warn").textContent="Cada franja debe terminar después de empezar."; return; } segments.push([a,b]); }
+  }
+  if(!segments.length){ el("m-warn").textContent="Definí al menos una franja."; return; }
+  const from=el("m-from").value, to=el("m-to").value;
+  if(!from||!to){ el("m-warn").textContent="Completá la vigencia."; return; }
+  if(from<"2020-01-01"){ el("m-warn").textContent="El controlador rechaza fechas anteriores a 2020."; return; }
+  el("m-warn").textContent="Guardando…";
+  const r=await fetch(`${API}/profile/${pid}`,{method:"PUT",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({from,to,weekdays,segments,linked:0})});
+  const d=await r.json().catch(()=>({}));
+  if(r.ok){ el("modal").style.display="none"; load(); }
+  else el("m-warn").textContent="Error: "+(d.error||r.status);
+};
+async function del(card,pid){
+  if(!confirm("Borrar el horario "+pid+"?\nLas tarjetas que lo tengan asignado quedan sin ese horario en esa puerta.")) return;
+  const msg=card.querySelector(".msg"); msg.className="msg"; msg.textContent="…";
+  const r=await fetch(`${API}/profile/${pid}`,{method:"DELETE"});
+  const d=await r.json().catch(()=>({}));
+  if(r.ok) load(); else { msg.className="msg warn"; msg.textContent="Error: "+(d.error||r.status); }
+}
+load();
+</script>
+</body>
+</html>
