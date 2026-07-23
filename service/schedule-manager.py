@@ -607,9 +607,12 @@ def _groups_shape(gs):
     return out
 
 
-# --- origen del MODELO (cards/groups). Hoy = JSON del panel; MODEL_SOURCE='db' lo lee
-#     de doors.db (espejo). El flip a 'db' es el corte de propiedad hacia el portal. ---
-MODEL_SOURCE = 'json'
+# --- origen del MODELO (cards/groups). 'db' lee de doors.db (espejo, probado byte-exacto
+#     contra el JSON del panel); 'json' lee el JSON del panel. Etapa 2 (2026-07-23): flip a
+#     'db' -> las lecturas salen de la DB. Las ESCRITURAS siguen yendo por la API del panel,
+#     que actualiza cards.json y dispara _remirror -> la sombra queda fresca. Revertir a
+#     'json' es el rollback (una linea). ---
+MODEL_SOURCE = 'db'
 
 
 def _model_cards():
