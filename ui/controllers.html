@@ -68,12 +68,20 @@ async function load(){
     bTime.onclick=()=>action(card, `${API}/controllers/${c.serial}/set-time`, "POST", {}, "Reloj sincronizado", null);
     row1.appendChild(bTime);
     card.appendChild(row1);
-    // abrir puerta
+    // abrir puerta — puertas reales del controlador (numero + nombre), no 1..4 generico
     const row2=document.createElement("div"); row2.className="row";
-    const sel=document.createElement("select"); ["1","2","3","4"].forEach(d=>{const o=document.createElement("option");o.value=d;o.textContent="Puerta "+d;sel.appendChild(o)});
-    const bOpen=document.createElement("button"); bOpen.textContent="Abrir puerta";
-    bOpen.onclick=()=>{ if(confirm(`¿Abrir puerta ${sel.value} de ${c.name||c.serial}?`)) action(card, `${API}/controllers/${c.serial}/open-door`, "POST", {door:sel.value}, "Puerta abierta", null); };
-    row2.appendChild(sel); row2.appendChild(bOpen);
+    const doors=c.doors||[];
+    if(doors.length){
+      const sel=document.createElement("select");
+      doors.forEach(d=>{const o=document.createElement("option");o.value=d.number;o.textContent=`${d.number} · ${d.name}`;sel.appendChild(o)});
+      const bOpen=document.createElement("button"); bOpen.textContent="Abrir puerta";
+      bOpen.onclick=()=>{ const dn=sel.options[sel.selectedIndex].textContent;
+        if(confirm(`¿Abrir "${dn}" de ${c.name||c.serial}?`)) action(card, `${API}/controllers/${c.serial}/open-door`, "POST", {door:sel.value}, "Puerta abierta", null); };
+      row2.appendChild(sel); row2.appendChild(bOpen);
+    }else{
+      const w=document.createElement("span"); w.className="msg warn"; w.textContent="Sin puertas mapeadas para este controlador.";
+      row2.appendChild(w);
+    }
     card.appendChild(row2);
     const msg=document.createElement("div"); msg.className="msg"; card.appendChild(msg);
     g.appendChild(card);

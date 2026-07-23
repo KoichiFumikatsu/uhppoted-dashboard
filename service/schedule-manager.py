@@ -749,9 +749,34 @@ def _apply_names(status):
     return status
 
 
+def _controller_doors():
+    """{serial: [{number, oid, name}]} desde controllers.json + acl-extra + nombres reales."""
+    names = {}
+    data = _load_json(DOORS_JSON, {})
+    for d in (data.get('doors', []) if isinstance(data, dict) else data):
+        names[str(d.get('OID', ''))] = d.get('name', '')
+    names.update(_door_name_overrides())
+    out = {}
+    for c in _controllers():
+        rows = []
+        for num, oid in sorted(c['doors'].items(), key=lambda kv: int(kv[0])):
+            rows.append({'number': str(num), 'oid': str(oid),
+                         'name': names.get(str(oid)) or ('Puerta ' + str(num))})
+        out[c['serial']] = rows
+    return out
+
+
+def _apply_doors(status):
+    dm = _controller_doors()
+    for r in status.get('controllers', []):
+        r['doors'] = dm.get(str(r.get('serial')), [])
+    return status
+
+
 def api_controllers_status():
-    return 200, _apply_names(_load_json(CONTROLLERS_STATUS_JSON,
-                             {'controllers': [], 'updated': None, 'refreshing': False}))
+    return 200, _apply_doors(_apply_names(_load_json(
+        CONTROLLERS_STATUS_JSON,
+        {'controllers': [], 'updated': None, 'refreshing': False})))
 
 
 def api_controllers_names():
@@ -786,6 +811,9 @@ def api_open_door(serial, body):
     door = str(body.get('door', '1'))
     if door not in ('1', '2', '3', '4'):
         return 400, {'error': 'door must be 1..4'}
+    mapped = {d['number'] for d in _controller_doors().get(serial, [])}
+    if mapped and door not in mapped:
+        return 400, {'error': 'esa puerta no existe en este controlador'}
     rc, out, err = _run(['--timeout', '6s', 'open-door', serial, door], timeout=10)
     if rc != 0:
         return 500, {'error': err or out or 'cli failed'}
