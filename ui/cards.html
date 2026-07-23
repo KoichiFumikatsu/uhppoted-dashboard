@@ -51,9 +51,11 @@
     <button class="sec" id="selall">Seleccionar los filtrados</button>
     <button class="sec" id="selnone">Limpiar</button>
     <button id="bulkbtn">Permisos en lote</button>
+    <button id="grpbtn">Grupos en lote</button>
+    <button class="sec" id="delbtn">Borrar seleccionadas</button>
   </div>
   <table>
-    <thead><tr><th><input type="checkbox" id="chkall"></th><th>Tarjeta</th><th>Desde</th><th>Hasta</th><th>Grupos</th><th></th></tr></thead>
+    <thead><tr><th><input type="checkbox" id="chkall"></th><th>Tarjeta</th><th>Nombre</th><th>Desde</th><th>Hasta</th><th>Grupos</th><th></th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
 </div>
@@ -70,6 +72,34 @@
     <div class="actions">
       <button class="sec" id="m-cancel">Cancelar</button>
       <button id="m-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="emodal">
+  <div class="box">
+    <h3>Tarjeta <span id="e-card"></span></h3>
+    <label>Nombre <input id="e-name" placeholder="Nombre de la persona"></label>
+    <div style="color:#9fb0c0;font-size:12px;margin-top:8px">Grupos</div>
+    <div id="e-groups"></div>
+    <div class="warn" id="e-warn"></div>
+    <div class="actions">
+      <button class="sec" id="e-del">Borrar tarjeta</button>
+      <button class="sec" id="e-cancel">Cancelar</button>
+      <button id="e-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="gmodal">
+  <div class="box">
+    <h3>Grupos en lote — <span id="g-count"></span></h3>
+    <div style="color:#9fb0c0;font-size:12px">Solo se aplican los grupos que cambies.</div>
+    <div id="g-groups"></div>
+    <div class="warn" id="g-warn"></div>
+    <div class="actions">
+      <button class="sec" id="g-cancel">Cancelar</button>
+      <button id="g-save">Aplicar</button>
     </div>
   </div>
 </div>
@@ -94,7 +124,12 @@ const API = "/schedules/api";
 let ALL = [];
 function el(id){return document.getElementById(id);}
 
+let GROUPS = [];
+async function loadGroups(){
+  try{ const r=await fetch(`${API}/groups`); if(r.ok) GROUPS=(await r.json()).groups||[]; }catch(e){}
+}
 async function loadList(){
+  await loadGroups();
   const r = await fetch(`${API}/cards-list`);
   if(!r.ok){ if(r.status===401) location.href="/portal/login.html"; el("count").textContent="sin acceso"; return; }
   ALL = (await r.json()).cards || [];
@@ -111,13 +146,16 @@ function render(){
     const ck=document.createElement("input"); ck.type="checkbox"; ck.checked=SEL.has(String(c.card));
     ck.onchange=()=>{ ck.checked?SEL.add(String(c.card)):SEL.delete(String(c.card)); updSel(); };
     tdc.appendChild(ck); tr.appendChild(tdc);
-    const g = (c.groups||[]).length;
-    [String(c.card||""), c.from||"", c.to||"", g ? (g+" grupo"+(g>1?"s":"")) : "—"].forEach(v=>{
+    const gn=(c.groups||[]).map(o=>(GROUPS.find(g=>g.oid===o)||{}).name||o).join(", ");
+    [String(c.card||""), c.name||"—", c.from||"", c.to||"", gn||"—"].forEach(v=>{
       const td=document.createElement("td"); td.textContent=v; tr.appendChild(td);
     });
     const td=document.createElement("td");
     const b=document.createElement("button"); b.className="sec"; b.textContent="Permisos";
-    b.onclick=()=>openCard(c.card); td.appendChild(b); tr.appendChild(td);
+    b.onclick=()=>openCard(c.card); td.appendChild(b);
+    const e=document.createElement("button"); e.className="sec"; e.textContent="Editar";
+    e.onclick=()=>openEdit(c); td.appendChild(e);
+    tr.appendChild(td);
     tb.appendChild(tr);
   }
   updSel();
@@ -195,6 +233,92 @@ el("m-save").onclick=async()=>{
     if((d.pending_publish||[]).length) alert("Guardado. Palmetto aplicado.\nPendiente de Publicar: "+d.pending_publish.join(", "));
   }else{ alert("Error: "+(d.error||r.status)); }
 };
+// ---- editar tarjeta: nombre, grupos, borrar ----
+let EDIT=null;
+function groupRow(container,checkedFn,states){
+  container.innerHTML="";
+  for(const g of GROUPS){
+    const row=document.createElement("div"); row.className="drow";
+    const nm=document.createElement("span"); nm.textContent=g.name+" ("+(g.doors||[]).length+" puertas)";
+    let ctl;
+    if(states){
+      ctl=document.createElement("select"); ctl.dataset.oid=g.oid;
+      for(const o of [["__","Sin cambio"],["true","Agregar"],["false","Quitar"]]){
+        const op=document.createElement("option"); op.value=o[0]; op.textContent=o[1]; ctl.appendChild(op);
+      }
+    }else{
+      ctl=document.createElement("input"); ctl.type="checkbox"; ctl.dataset.oid=g.oid; ctl.checked=checkedFn(g);
+    }
+    row.appendChild(nm); row.appendChild(ctl); container.appendChild(row);
+  }
+}
+function openEdit(c){
+  EDIT=c;
+  el("e-card").textContent=c.card;
+  el("e-name").value=c.name||"";
+  groupRow(el("e-groups"), g=>(c.groups||[]).includes(g.oid), false);
+  el("e-warn").textContent="";
+  el("emodal").style.display="flex";
+}
+el("e-cancel").onclick=()=>{ el("emodal").style.display="none"; };
+el("e-save").onclick=async()=>{
+  const orig=new Set(EDIT.groups||[]), groups={};
+  el("e-groups").querySelectorAll("input").forEach(i=>{
+    if(i.checked!==orig.has(i.dataset.oid)) groups[i.dataset.oid]=i.checked;
+  });
+  el("e-warn").textContent="Guardando…";
+  try{
+    if((el("e-name").value||"")!==(EDIT.name||"")){
+      const r=await fetch(`${API}/card/${EDIT.card}/name`,{method:"PUT",body:JSON.stringify({name:el("e-name").value})});
+      if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error||r.status);
+    }
+    if(Object.keys(groups).length){
+      const r=await fetch(`${API}/card/${EDIT.card}/groups`,{method:"PUT",body:JSON.stringify({groups})});
+      if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error||r.status);
+    }
+    el("emodal").style.display="none"; loadList();
+  }catch(e){ el("e-warn").textContent="Error: "+e.message; }
+};
+el("e-del").onclick=async()=>{
+  if(!confirm("Borrar la tarjeta "+EDIT.card+"?\nSe quita del panel y se revoca en Palmetto de inmediato. En Tequendama sale al Publicar.")) return;
+  const r=await fetch(`${API}/card/${EDIT.card}`,{method:"DELETE"});
+  const d=await r.json().catch(()=>({}));
+  if(r.ok){ el("emodal").style.display="none"; loadList();
+    if(!d.palmetto_deleted) alert("Borrada del panel, pero falló la revocación en Palmetto: "+(d.palmetto_error||"")); }
+  else alert("Error: "+(d.error||r.status));
+};
+
+// ---- lote: grupos y borrado ----
+el("grpbtn").onclick=()=>{
+  if(!SEL.size) return;
+  el("g-count").textContent=SEL.size+" tarjetas";
+  groupRow(el("g-groups"),null,true);
+  el("g-warn").textContent="";
+  el("gmodal").style.display="flex";
+};
+el("g-cancel").onclick=()=>{ el("gmodal").style.display="none"; };
+el("g-save").onclick=async()=>{
+  const groups={};
+  el("g-groups").querySelectorAll("select").forEach(s=>{ if(s.value!=="__") groups[s.dataset.oid]=s.value==="true"; });
+  if(!Object.keys(groups).length){ alert("No cambiaste ningún grupo."); return; }
+  if(!confirm("Aplicar a "+SEL.size+" tarjetas?")) return;
+  el("g-save").disabled=true; el("g-warn").textContent="Aplicando…";
+  const r=await fetch(`${API}/bulk-cards`,{method:"POST",body:JSON.stringify({cards:[...SEL],action:"groups",groups})});
+  const d=await r.json().catch(()=>({}));
+  el("g-save").disabled=false; el("gmodal").style.display="none";
+  alert(r.ok?("Aplicadas "+d.ok+" · fallaron "+d.failed):("Error: "+(d.error||r.status)));
+  SEL.clear(); loadList();
+};
+el("delbtn").onclick=async()=>{
+  if(!SEL.size) return;
+  if(!confirm("Borrar "+SEL.size+" tarjetas?\nSe quitan del panel y se revocan en Palmetto. En Tequendama salen al Publicar.")) return;
+  if(!confirm("Confirmá otra vez: esto revoca el acceso de "+SEL.size+" personas.")) return;
+  const r=await fetch(`${API}/bulk-cards`,{method:"POST",body:JSON.stringify({cards:[...SEL],action:"delete"})});
+  const d=await r.json().catch(()=>({}));
+  alert(r.ok?("Borradas "+d.ok+" · fallaron "+d.failed):("Error: "+(d.error||r.status)));
+  SEL.clear(); loadList();
+};
+
 el("bulkbtn").onclick=async()=>{
   const first=[...SEL][0];
   const r=await fetch(`${API}/card-doors/${first}`);

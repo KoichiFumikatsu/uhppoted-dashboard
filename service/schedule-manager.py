@@ -22,6 +22,8 @@ import subprocess
 import sys
 import threading
 import sqlite3
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -295,6 +297,7 @@ def api_cards_list():
         # only basic info; per-door permissions queried on demand via /api/card/<n>
         out.append({
             'card': c.get('card'),
+            'name': c.get('name', ''),
             'from': c.get('from'),
             'to': c.get('to'),
             'groups': c.get('groups', []),
@@ -637,6 +640,154 @@ def api_put_card_doors(card, body):
     teq = sorted({valid[o][0] for o in clean if valid[o][0] != PALMETTO})
     return 200, {'ok': True, 'card': str(card), 'palmetto_applied': applied,
                  'pending_publish': teq}
+
+
+# ---- Cliente del panel httpd ----
+# cards.json/groups.json son propiedad del panel: los carga a memoria al arrancar y solo
+# los reescribe el mismo. Escribirlos por fuera se pierde en la siguiente edicion del panel,
+# asi que todo cambio del modelo del panel va por su propia API HTTP.
+PANEL_BASE = 'https://127.0.0.1:8543'
+PANEL_CRED = Path('/etc/uhppoted/portal/panel-cred.json')
+_panel_ctx = ssl.create_default_context()
+_panel_ctx.check_hostname = False
+_panel_ctx.verify_mode = ssl.CERT_NONE
+_panel_session = {'cookie': None}
+
+
+def _panel_request(method, path, body=None, cookies=None):
+    req = urllib.request.Request(PANEL_BASE + path, method=method)
+    if body is not None:
+        req.add_header('Content-Type', 'application/json')
+        req.data = json.dumps(body).encode()
+    if cookies:
+        req.add_header('Cookie', '; '.join('%s=%s' % kv for kv in cookies.items()))
+    with urllib.request.urlopen(req, timeout=15, context=_panel_ctx) as r:
+        got = {}
+        for sc in (r.headers.get_all('Set-Cookie') or []):
+            k, _, v = sc.split(';', 1)[0].partition('=')
+            got[k.strip()] = v.strip()
+        return r.status, got, r.read()
+
+
+def _panel_login():
+    _, c1, _ = _panel_request('HEAD', '/authenticate')
+    login = c1.get('uhppoted-httpd-login')
+    if not login:
+        raise RuntimeError('el panel no entrego cookie de login')
+    cred = _load_json(PANEL_CRED, {})
+    if not cred.get('uid'):
+        raise RuntimeError('falta la credencial del portal para el panel')
+    _, c2, _ = _panel_request('POST', '/authenticate',
+                              {'uid': cred['uid'], 'pwd': cred['pwd']},
+                              {'uhppoted-httpd-login': login})
+    sess = c2.get('uhppoted-httpd-session')
+    if not sess:
+        raise RuntimeError('el panel rechazo las credenciales del portal')
+    _panel_session['cookie'] = sess
+    return sess
+
+
+def _panel_post(path, payload):
+    for attempt in (1, 2):
+        sess = _panel_session['cookie'] or _panel_login()
+        try:
+            _, _, data = _panel_request('POST', path, payload,
+                                        {'uhppoted-httpd-session': sess})
+            return json.loads(data.decode() or '{}')
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and attempt == 1:
+                _panel_session['cookie'] = None
+                continue
+            raise RuntimeError('panel %s: %s' % (e.code, e.read().decode()[:200]))
+        except urllib.error.URLError as e:
+            raise RuntimeError('panel inalcanzable: %s' % e)
+    raise RuntimeError('panel: no se pudo abrir sesion')
+
+
+def _card_record(card):
+    data = _load_json(CARDS_JSON, {})
+    for c in (data.get('cards', []) if isinstance(data, dict) else data):
+        if str(c.get('card')) == str(card):
+            return c
+    return None
+
+
+def api_set_card_name(card, body):
+    cd = _card_record(card)
+    if cd is None:
+        return 404, {'error': 'la tarjeta no esta en el panel'}
+    name = (body.get('name') or '').strip()
+    try:
+        _panel_post('/cards', {'updated': [{'oid': cd['OID'] + '.1', 'value': name}]})
+    except RuntimeError as e:
+        return 502, {'error': str(e)}
+    return 200, {'ok': True, 'card': str(card), 'name': name}
+
+
+def api_set_card_groups(card, body):
+    """body: {groups:{'<group_oid>': true|false}} — solo los grupos indicados se tocan."""
+    cd = _card_record(card)
+    if cd is None:
+        return 404, {'error': 'la tarjeta no esta en el panel'}
+    groups = _groups()
+    updated = []
+    for goid, on in (body.get('groups') or {}).items():
+        if goid not in groups:
+            return 400, {'error': 'grupo desconocido: %s' % goid}
+        updated.append({'oid': '%s.5.%s' % (cd['OID'], str(goid).split('.')[-1]),
+                        'value': 'true' if on else 'false'})
+    if not updated:
+        return 400, {'error': 'sin grupos'}
+    try:
+        _panel_post('/cards', {'updated': updated})
+    except RuntimeError as e:
+        return 502, {'error': str(e)}
+    # el grupo cambia el efectivo: repropagar Palmetto (el panel no empuja solo)
+    keep = (_card_overrides().get(str(card)) or {}).get('doors') or {}
+    code, resp = api_put_card_doors(card, {'doors': keep})
+    if code != 200:
+        return 200, {'ok': True, 'card': str(card), 'palmetto_warning': resp.get('error')}
+    return 200, {'ok': True, 'card': str(card),
+                 'palmetto_applied': resp.get('palmetto_applied'),
+                 'pending_publish': resp.get('pending_publish')}
+
+
+def api_delete_card(card):
+    cd = _card_record(card)
+    if cd is None:
+        return 404, {'error': 'la tarjeta no esta en el panel'}
+    try:
+        _panel_post('/cards', {'deleted': [cd['OID']]})
+    except RuntimeError as e:
+        return 502, {'error': str(e)}
+    ov = _card_overrides()
+    if ov.pop(str(card), None) is not None:
+        _save_card_overrides(ov)
+    # revocacion inmediata en Palmetto; Teq sale al publicar (load-acl borra las no listadas)
+    rc, out, err = _run(['--timeout', '6s', 'delete-card', PALMETTO, str(card)], timeout=10)
+    return 200, {'ok': True, 'card': str(card), 'palmetto_deleted': rc == 0,
+                 'palmetto_error': None if rc == 0 else (err or out or 'cli failed'),
+                 'pending_publish': True}
+
+
+def api_bulk_cards(body):
+    """body: {cards:[...], action:'groups'|'delete', groups:{...}}"""
+    cards = body.get('cards') or []
+    action = body.get('action')
+    if not cards:
+        return 400, {'error': 'sin tarjetas'}
+    if action not in ('groups', 'delete'):
+        return 400, {'error': "action debe ser 'groups' o 'delete'"}
+    results = []
+    for c in cards:
+        if action == 'groups':
+            code, resp = api_set_card_groups(c, {'groups': body.get('groups') or {}})
+        else:
+            code, resp = api_delete_card(c)
+        results.append({'card': str(c), 'ok': code == 200,
+                        'error': None if code == 200 else resp.get('error')})
+    ok = sum(1 for r in results if r['ok'])
+    return 200, {'ok': ok, 'failed': len(results) - ok, 'results': results}
 
 
 def api_bulk_card_doors(body):
@@ -1059,6 +1210,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._write(p, 'PUT', api_put_profile(p.split('/')[-1], body), body)
         if p.startswith('/api/card-doors/'):
             return self._write(p, 'PUT', api_put_card_doors(p.split('/')[-1], body), body)
+        if p.startswith('/api/card/') and p.endswith('/name'):
+            return self._write(p, 'PUT', api_set_card_name(p.split('/')[3], body), body)
+        if p.startswith('/api/card/') and p.endswith('/groups'):
+            return self._write(p, 'PUT', api_set_card_groups(p.split('/')[3], body), body)
         if p.startswith('/api/card/'):
             return self._write(p, 'PUT', api_put_card(p.split('/')[-1], body), body)
         if p.startswith('/api/doors/') and p.endswith('/name'):
@@ -1073,6 +1228,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         p = urlparse(self.path).path.rstrip('/')
         if p.startswith('/api/profile/'):
             return self._write(p, 'DELETE', api_delete_profile(p.split('/')[-1]), {})
+        if p.startswith('/api/card/'):
+            return self._write(p, 'DELETE', api_delete_card(p.split('/')[-1]), {})
         return self._json(404, {'error': 'not found'})
 
     def do_POST(self):
@@ -1082,6 +1239,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._write(p, 'POST', api_bulk_assign(body), body)
         if p == '/api/bulk-card-doors':
             return self._write(p, 'POST', api_bulk_card_doors(body), body)
+        if p == '/api/bulk-cards':
+            return self._write(p, 'POST', api_bulk_cards(body), body)
         if p == '/api/publish':
             return self._write(p, 'POST', api_publish(body), body)
         if p == '/api/controllers-refresh':
