@@ -498,6 +498,7 @@ def generate_acl_tsv(only_serial=None):
             columns.append((label, oid))
 
     pins = _load_json(CARD_PINS_JSON, {})
+    overrides = _card_overrides()
     header = ['Card Number', 'PIN', 'From', 'To'] + [lbl for lbl, _ in columns]
     rows = [header]
     for cd in cards:
@@ -508,11 +509,123 @@ def generate_acl_tsv(only_serial=None):
         to = cd.get('to', '2099-12-31')
         gids = cd.get('groups') or []
         pin = str(pins.get(str(cardnum), '') or '')
-        cells = [_cell_for_door(gids, oid, groups, role_profiles) for _, oid in columns]
+        ov = (overrides.get(str(cardnum)) or {}).get('doors') or {}
+        cells = [str(ov.get(oid, _cell_for_door(gids, oid, groups, role_profiles)))
+                 for _, oid in columns]
         rows.append([str(cardnum), pin, frm, to] + cells)
 
     tsv = '\n'.join('\t'.join(r) for r in rows) + '\n'
     return tsv, header, len(rows) - 1
+
+
+# ---- Permisos por tarjeta sobre las 16 puertas (override portal-owned + push) ----
+CARD_DOOR_OVERRIDES_JSON = Path('/var/uhppoted/analytics/card-door-overrides.json')
+PALMETTO = '222451671'
+
+
+def _card_overrides():
+    return _load_json(CARD_DOOR_OVERRIDES_JSON, {})
+
+
+def _save_card_overrides(ov):
+    CARD_DOOR_OVERRIDES_JSON.parent.mkdir(parents=True, exist_ok=True)
+    tmp = str(CARD_DOOR_OVERRIDES_JSON) + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(ov, f, indent=1, ensure_ascii=False)
+    Path(tmp).replace(CARD_DOOR_OVERRIDES_JSON)
+
+
+def _last_publish_ts():
+    try:
+        st = (ACL_DIR / 'latest.tsv').stat()
+    except OSError:
+        return None
+    return datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def _door_oid_names():
+    names = {}
+    ddata = _load_json(DOORS_JSON, {})
+    for d in (ddata.get('doors', []) if isinstance(ddata, dict) else []):
+        names[str(d.get('OID'))] = d.get('name', '')
+    names.update(_door_name_overrides())
+    return names
+
+
+def api_card_doors(card):
+    """Matriz de las 16 puertas para una tarjeta: valor del grupo, override y efectivo."""
+    cards = _load_json(CARDS_JSON, {})
+    cards = cards.get('cards', []) if isinstance(cards, dict) else cards
+    cd = next((c for c in cards if str(c.get('card')) == str(card)), None)
+    if cd is None:
+        return 404, {'error': 'la tarjeta no esta en el panel'}
+    groups = _groups()
+    role_profiles = _role_profiles()
+    gids = cd.get('groups') or []
+    ent = _card_overrides().get(str(card)) or {}
+    ov = ent.get('doors') or {}
+    names = _door_oid_names()
+    # nombre de placa resuelto aca: /api/controllers-names exige otra capacidad
+    cnames = dict(CONTROLLERS_META)
+    cnames.update(_name_overrides())
+    rows = []
+    for c in _controllers():
+        for num in sorted(c['doors'], key=int):
+            oid = str(c['doors'][num])
+            grp = _cell_for_door(gids, oid, groups, role_profiles)
+            rows.append({'serial': c['serial'],
+                         'ctrl_name': cnames.get(c['serial'], c['serial']),
+                         'number': str(num), 'oid': oid,
+                         'name': names.get(oid) or ('Puerta ' + str(num)),
+                         'group_value': grp, 'override': ov.get(oid),
+                         'value': str(ov.get(oid, grp))})
+    pub = _last_publish_ts()
+    return 200, {'card': str(card), 'from': cd.get('from'), 'to': cd.get('to'),
+                 'groups': gids, 'doors': rows, 'last_publish': pub,
+                 'pending_publish': bool(ent.get('ts') and (pub is None or ent['ts'] > pub))}
+
+
+def api_put_card_doors(card, body):
+    """Guarda el override y aplica Palmetto de una (LAN); Teq queda pendiente de Publicar."""
+    valid = {}
+    for c in _controllers():
+        for num, oid in c['doors'].items():
+            valid[str(oid)] = (c['serial'], str(num))
+    clean = {}
+    for oid, v in (body.get('doors') or {}).items():
+        oid, v = str(oid), str(v)
+        if oid not in valid:
+            return 400, {'error': 'puerta desconocida: ' + oid}
+        if v not in ('Y', 'N'):
+            try:
+                pid = int(v)
+            except ValueError:
+                return 400, {'error': 'valor invalido en %s: %s' % (oid, v)}
+            if not 2 <= pid <= 254:
+                return 400, {'error': 'profile fuera de rango en ' + oid}
+        clean[oid] = v
+
+    ov = _card_overrides()
+    if clean:
+        ov[str(card)] = {'doors': clean, 'ts': _now_str()}
+    else:
+        ov.pop(str(card), None)
+    _save_card_overrides(ov)
+
+    code, eff = api_card_doors(card)
+    if code != 200:
+        return code, eff
+    pdoors = {r['number']: r['value'] for r in eff['doors'] if r['serial'] == PALMETTO}
+    if pdoors:
+        # from/to no tienen override: van al hardware pero el panel los repone al publicar
+        c2, r2 = api_put_card(card, {'from': body.get('from') or eff['from'],
+                                     'to': body.get('to') or eff['to'], 'doors': pdoors})
+        if c2 != 200:
+            return 500, {'error': 'override guardado pero fallo el push a Palmetto: %s'
+                                  % r2.get('error', ''), 'saved': True}
+    teq = sorted({valid[o][0] for o in clean if valid[o][0] != PALMETTO})
+    return 200, {'ok': True, 'card': str(card), 'palmetto_applied': bool(pdoors),
+                 'pending_publish': teq}
 
 
 def api_get_role_profiles():
@@ -878,6 +991,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(*api_get_profiles())
         if p.startswith('/api/profile/'):
             return self._json(*api_get_profile(p.split('/')[-1]))
+        if p.startswith('/api/card-doors/'):
+            return self._json(*api_card_doors(p.split('/')[-1]))
         if p.startswith('/api/card/'):
             return self._json(*api_get_card(p.split('/')[-1]))
         if p == '/api/cards-list':
@@ -907,6 +1022,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = self._body()
         if p.startswith('/api/profile/'):
             return self._write(p, 'PUT', api_put_profile(p.split('/')[-1], body), body)
+        if p.startswith('/api/card-doors/'):
+            return self._write(p, 'PUT', api_put_card_doors(p.split('/')[-1], body), body)
         if p.startswith('/api/card/'):
             return self._write(p, 'PUT', api_put_card(p.split('/')[-1], body), body)
         if p.startswith('/api/doors/') and p.endswith('/name'):
