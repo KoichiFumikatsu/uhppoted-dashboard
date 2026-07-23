@@ -181,7 +181,8 @@ async function openCard(card){
   el("m-to").value = (CUR.to||"").slice(0,10);
   const dd = el("m-doors"); dd.innerHTML="";
   let curSerial=null, box=null;
-  for(const d of CUR.doors){
+  // una puerta no usada solo aparece si esta tarjeta ya tiene un valor propio ahi
+  for(const d of CUR.doors.filter(d=>d.used!==false||d.override!=null)){
     if(d.serial!==curSerial){
       curSerial=d.serial;
       box=document.createElement("div"); box.className="ctrl";
@@ -327,7 +328,7 @@ el("bulkbtn").onclick=async()=>{
   el("b-count").textContent=SEL.size+" tarjetas";
   const dd=el("b-doors"); dd.innerHTML="";
   let cur=null, box=null;
-  for(const x of d.doors){
+  for(const x of d.doors.filter(x=>x.used!==false)){
     if(x.serial!==cur){
       cur=x.serial; box=document.createElement("div"); box.className="ctrl";
       const h=document.createElement("h4"); h.textContent=x.ctrl_name+" · "+x.serial;

@@ -113,7 +113,8 @@ function openDoors(gr){
   const dd=el("m-doors"); dd.innerHTML="";
   const have=new Set(gr.door_oids||[]);
   let cur=null, box=null;
-  for(const d of DOORS){
+  // no usada solo aparece si el grupo ya la concede
+  for(const d of DOORS.filter(d=>d.used!==false||have.has(d.OID))){
     const serial=d.serial||"";
     if(serial!==cur){
       cur=serial; box=document.createElement("div"); box.className="ctrl";

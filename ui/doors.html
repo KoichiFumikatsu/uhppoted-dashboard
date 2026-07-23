@@ -21,7 +21,8 @@
   .meta{color:#9fb0c0;font-size:12px;line-height:1.7;margin:8px 0}
   .meta b{color:#e6edf3;font-weight:600}
   .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
-  input{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:12px;min-width:140px}
+  input,select{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:12px;min-width:140px}
+  select{min-width:auto}
   .msg{font-size:11px;color:#9fb0c0;min-height:14px;margin-top:6px}
   .warn{color:#fab219}
   .tag{font-size:10px;padding:2px 7px;border-radius:9px;background:#0f1720;border:1px solid #2a3a49;color:#9fb0c0}
@@ -29,7 +30,7 @@
 </head>
 <body>
 <div class="head"><b>Puertas</b><span class="badge" id="count">—</span></div>
-<div class="note">Config de puertas: nombre, retardo de apertura y modo. Aquí solo se edita el nombre (el nombre se muestra en el portal). Cambiar retardo/modo se hace por ahora en el Panel nativo.</div>
+<div class="note">Nombre y marca de uso son del portal. <b>Retardo y modo se escriben en el controlador</b>: el modo <i>normalmente abierta</i> deja la puerta franca y <i>normalmente cerrada</i> la deja bloqueada, así que piden doble confirmación. Marcar una puerta como <b>no usada</b> no la borra: la esconde de los selectores de Tarjetas y Grupos.</div>
 <div class="grid" id="grid"></div>
 
 <link rel="stylesheet" href="/portal/shell.css">
@@ -47,19 +48,69 @@ async function load(){
   const g=document.getElementById("grid"); g.innerHTML="";
   for(const d of doors){
     const card=document.createElement("div"); card.className="card";
+    if(!d.used) card.style.opacity=".62";
     const modo=MODES[d.mode]||d.mode||"—";
     card.innerHTML=
       `<h3>${escapeHtml(d.name||d.OID)}</h3>`+
-      `<div class="meta">OID <b>${escapeHtml(d.OID)}</b> · Retardo <b>${d.delay!=null?d.delay+"s":"—"}</b><br>`+
-      `Modo <span class="tag">${escapeHtml(modo)}</span></div>`;
+      `<div class="meta">${escapeHtml(d.ctrl_name||"")} · puerta <b>${escapeHtml(d.number||"?")}</b> · OID ${escapeHtml(d.OID)}<br>`+
+      `Retardo <b>${d.delay!=null?d.delay+"s":"—"}</b> · Modo <span class="tag">${escapeHtml(modo)}</span>`+
+      (d.used?"":` · <span class="tag">no usada</span>`)+`</div>`;
+
     const row=document.createElement("div"); row.className="row";
     const inp=document.createElement("input"); inp.value=d.name||""; inp.placeholder="nombre";
     const b=document.createElement("button"); b.className="sec"; b.textContent="Renombrar";
     b.onclick=()=>rename(card, d.OID, inp.value.trim());
-    row.appendChild(inp); row.appendChild(b); card.appendChild(row);
+    row.appendChild(inp); row.appendChild(b);
+    const bu=document.createElement("button"); bu.className="sec";
+    bu.textContent=d.used?"Marcar no usada":"Marcar en uso";
+    bu.onclick=()=>send(card, `${API}/doors/${encodeURIComponent(d.OID)}/usage`, {used:!d.used}, "Marca actualizada");
+    row.appendChild(bu);
+    card.appendChild(row);
+
+    // retardo y modo: escriben el controlador
+    const row2=document.createElement("div"); row2.className="row";
+    const dl=document.createElement("input"); dl.type="number"; dl.min="1"; dl.max="60";
+    dl.value=d.delay!=null?d.delay:""; dl.style.minWidth="70px"; dl.title="segundos";
+    const bd=document.createElement("button"); bd.className="sec"; bd.textContent="Retardo";
+    bd.onclick=()=>{
+      const v=parseInt(dl.value,10);
+      if(!(v>=1&&v<=60)){ msgOf(card,"El retardo debe ser 1..60 s",true); return; }
+      if(!confirm(`Poner el retardo de "${d.name||d.OID}" en ${v} s? Se escribe en el controlador.`)) return;
+      send(card, `${API}/doors/${encodeURIComponent(d.OID)}/config`, {delay:v}, "Retardo aplicado");
+    };
+    const sel=document.createElement("select");
+    for(const m of Object.keys(MODES)){
+      const o=document.createElement("option"); o.value=m; o.textContent=MODES[m];
+      if(m===d.mode) o.selected=true; sel.appendChild(o);
+    }
+    const bm=document.createElement("button"); bm.className="sec"; bm.textContent="Modo";
+    bm.onclick=()=>{
+      if(sel.value===d.mode){ msgOf(card,"El modo ya es ese",true); return; }
+      const riesgo = sel.value==="normally open" ? "La puerta queda FRANCA (abierta permanentemente)."
+                   : sel.value==="normally closed" ? "La puerta queda BLOQUEADA (no abre ni con tarjeta)."
+                   : "La puerta vuelve a abrir por tarjeta.";
+      if(!confirm(`Cambiar "${d.name||d.OID}" a ${MODES[sel.value]}?\n\n${riesgo}`)) return;
+      if(!confirm(`Confirmá otra vez. Esto se escribe YA en el controlador ${d.ctrl_name||d.serial}.`)) return;
+      send(card, `${API}/doors/${encodeURIComponent(d.OID)}/config`, {mode:sel.value}, "Modo aplicado");
+    };
+    row2.appendChild(dl); row2.appendChild(bd); row2.appendChild(sel); row2.appendChild(bm);
+    card.appendChild(row2);
+
     const msg=document.createElement("div"); msg.className="msg"; card.appendChild(msg);
     g.appendChild(card);
   }
+}
+function msgOf(card,text,warn){
+  const m=card.querySelector(".msg"); m.className=warn?"msg warn":"msg"; m.textContent=text;
+}
+async function send(card, url, body, okMsg){
+  msgOf(card,"…",false);
+  try{
+    const r=await fetch(url,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok){ msgOf(card,okMsg,false); load(); }
+    else msgOf(card,"Error: "+(d.error||r.status),true);
+  }catch(e){ msgOf(card,"Error de red",true); }
 }
 async function rename(card, oid, name){
   const msg=card.querySelector(".msg"); msg.className="msg"; msg.textContent="…";

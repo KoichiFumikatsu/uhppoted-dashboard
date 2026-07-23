@@ -70,7 +70,7 @@ async function load(){
     card.appendChild(row1);
     // abrir puerta — puertas reales del controlador (numero + nombre), no 1..4 generico
     const row2=document.createElement("div"); row2.className="row";
-    const doors=c.doors||[];
+    const doors=(c.doors||[]).filter(d=>d.used!==false);
     if(doors.length){
       const sel=document.createElement("select");
       doors.forEach(d=>{const o=document.createElement("option");o.value=d.number;o.textContent=`${d.number} · ${d.name}`;sel.appendChild(o)});

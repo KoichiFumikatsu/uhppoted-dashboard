@@ -366,6 +366,7 @@ def api_doors():
             owner[str(oid)] = (c['serial'], str(num))
     cnames = dict(CONTROLLERS_META)
     cnames.update(_name_overrides())
+    usage = _door_usage()
     for d in doors:
         oid = str(d.get('OID', ''))
         if oid in ov:
@@ -374,8 +375,70 @@ def api_doors():
         d['serial'] = serial
         d['number'] = num
         d['ctrl_name'] = cnames.get(serial, serial)
+        d['used'] = usage.get(oid, True)
     doors.sort(key=lambda d: (str(d.get('serial') or 'zz'), int(d.get('number') or 0)))
     return 200, {'doors': doors}
+
+
+def _door_usage():
+    """{door_oid: bool} — puertas marcadas como no usadas se filtran de los selectores."""
+    meta = _db_read(_db.doors_meta, {})
+    oids = _oid_by_dev_door()
+    return {oids[k]: v['used'] for k, v in meta.items() if k in oids}
+
+
+def api_set_door_usage(oid, body):
+    used = body.get('used')
+    if not isinstance(used, bool):
+        return 400, {'error': "se espera {used: true|false}"}
+    owner = {v: k for k, v in _oid_by_dev_door().items()}
+    if str(oid) not in owner:
+        return 404, {'error': 'puerta desconocida'}
+    dev, door = owner[str(oid)]
+    try:
+        _db_write(lambda c: _db.set_door_meta(c, dev, door, used=1 if used else 0))
+    except sqlite3.Error as e:
+        return 500, {'error': str(e)}
+    return 200, {'ok': True, 'oid': str(oid), 'used': used}
+
+
+_DOOR_MODES = ('normally open', 'normally closed', 'controlled')
+
+
+def api_set_door_config(oid, body):
+    """Retardo y modo van al CONTROLADOR, no al panel. Cambiar el modo puede dejar
+    la puerta abierta o cerrada de forma permanente: la UI exige doble confirmacion."""
+    owner = {v: k for k, v in _oid_by_dev_door().items()}
+    if str(oid) not in owner:
+        return 404, {'error': 'puerta desconocida'}
+    dev, door = owner[str(oid)]
+    serial = str(dev)
+    applied = {}
+    if 'delay' in body:
+        try:
+            delay = int(body['delay'])
+        except (TypeError, ValueError):
+            return 400, {'error': 'retardo invalido'}
+        if not 1 <= delay <= 60:
+            return 400, {'error': 'el retardo debe estar entre 1 y 60 segundos'}
+        rc, out, err = _run(['--timeout', '6s', 'set-door-delay', serial, str(door), str(delay)],
+                            timeout=10)
+        if rc != 0:
+            return 500, {'error': err or out or 'cli failed'}
+        applied['delay'] = delay
+    if 'mode' in body:
+        mode = str(body['mode'])
+        if mode not in _DOOR_MODES:
+            return 400, {'error': 'modo invalido: %s' % mode}
+        rc, out, err = _run(['--timeout', '6s', 'set-door-control', serial, str(door), mode],
+                            timeout=10)
+        if rc != 0:
+            return 500, {'error': err or out or 'cli failed'}
+        applied['mode'] = mode
+    if not applied:
+        return 400, {'error': 'nada que cambiar'}
+    return 200, {'ok': True, 'oid': str(oid), 'serial': serial, 'door': door,
+                 'applied': applied}
 
 
 def api_set_door_name(oid, body):
@@ -617,6 +680,7 @@ def api_card_doors(card):
     # nombre de placa resuelto aca: /api/controllers-names exige otra capacidad
     cnames = dict(CONTROLLERS_META)
     cnames.update(_name_overrides())
+    usage = _door_usage()
     rows = []
     for c in _controllers():
         for num in sorted(c['doors'], key=int):
@@ -624,6 +688,7 @@ def api_card_doors(card):
             grp = _cell_for_door(gids, oid, groups, role_profiles)
             rows.append({'serial': c['serial'],
                          'ctrl_name': cnames.get(c['serial'], c['serial']),
+                         'used': usage.get(oid, True),
                          'number': str(num), 'oid': oid,
                          'name': names.get(oid) or ('Puerta ' + str(num)),
                          'group_value': grp, 'override': ov.get(oid),
@@ -1154,11 +1219,13 @@ def _controller_doors():
     for d in (data.get('doors', []) if isinstance(data, dict) else data):
         names[str(d.get('OID', ''))] = d.get('name', '')
     names.update(_door_name_overrides())
+    usage = _door_usage()
     out = {}
     for c in _controllers():
         rows = []
         for num, oid in sorted(c['doors'].items(), key=lambda kv: int(kv[0])):
             rows.append({'number': str(num), 'oid': str(oid),
+                         'used': usage.get(str(oid), True),
                          'name': names.get(str(oid)) or ('Puerta ' + str(num))})
         out[c['serial']] = rows
     return out
@@ -1318,6 +1385,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._write(p, 'PUT', api_put_card(p.split('/')[-1], body), body)
         if p.startswith('/api/doors/') and p.endswith('/name'):
             return self._write(p, 'PUT', api_set_door_name(p.split('/')[3], body), body)
+        if p.startswith('/api/doors/') and p.endswith('/usage'):
+            return self._write(p, 'PUT', api_set_door_usage(p.split('/')[3], body), body)
+        if p.startswith('/api/doors/') and p.endswith('/config'):
+            return self._write(p, 'PUT', api_set_door_config(p.split('/')[3], body), body)
         if p.startswith('/api/groups-edit/') and p.endswith('/name'):
             return self._write(p, 'PUT', api_set_group_name(p.split('/')[3], body), body)
         if p.startswith('/api/groups-edit/') and p.endswith('/doors'):
