@@ -75,6 +75,16 @@ CREATE TABLE IF NOT EXISTS card_door_overrides (
     PRIMARY KEY (card, door_oid)
 );
 CREATE INDEX IF NOT EXISTS ix_cdo_door ON card_door_overrides(door_oid);
+
+CREATE TABLE IF NOT EXISTS time_profiles (
+    id       INTEGER PRIMARY KEY,   -- 2..254; MISMO significado en las 5 placas
+    from_d   TEXT,
+    to_d     TEXT,
+    weekdays TEXT,                  -- CSV Mon,Tue,Wed,Thu,Fri,Sat,Sun
+    segments TEXT,                  -- JSON [[start,end],...]
+    linked   INTEGER DEFAULT 0,
+    updated  TEXT
+);
 """
 
 # doors_meta nacio sin estas columnas: se agregan en caliente porque la tabla ya
@@ -199,6 +209,46 @@ def set_controller_name(conn, serial, name):
             "INSERT INTO controllers (serial, name, added) VALUES (?,?,?) "
             "ON CONFLICT(serial) DO UPDATE SET name=excluded.name",
             (int(serial), name, _now()))
+
+
+# ---- horarios (time profiles) — definicion central, misma para las 5 placas ----
+import json as _json
+
+
+def _profile_row(r):
+    return {'id': r[0], 'from': r[1], 'to': r[2],
+            'weekdays': [w for w in (r[3] or '').split(',') if w],
+            'segments': _json.loads(r[4] or '[]'), 'linked': r[5] or 0}
+
+
+def time_profiles(conn):
+    return [_profile_row(r) for r in conn.execute(
+        "SELECT id, from_d, to_d, weekdays, segments, linked "
+        "FROM time_profiles ORDER BY id")]
+
+
+def time_profile(conn, pid):
+    r = conn.execute(
+        "SELECT id, from_d, to_d, weekdays, segments, linked "
+        "FROM time_profiles WHERE id=?", (int(pid),)).fetchone()
+    return _profile_row(r) if r else None
+
+
+def set_time_profile(conn, pid, from_d, to_d, weekdays, segments, linked=0):
+    with conn:
+        conn.execute(
+            "INSERT INTO time_profiles (id, from_d, to_d, weekdays, segments, linked, updated) "
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET from_d=excluded.from_d, to_d=excluded.to_d, "
+            "weekdays=excluded.weekdays, segments=excluded.segments, "
+            "linked=excluded.linked, updated=excluded.updated",
+            (int(pid), from_d, to_d, ','.join(weekdays),
+             _json.dumps([list(s) for s in segments]), int(linked or 0), _now()))
+
+
+def delete_time_profile(conn, pid):
+    with conn:
+        conn.execute("DELETE FROM time_profiles WHERE id=?", (int(pid),))
 
 
 # añadir a doors_analytics/db.py

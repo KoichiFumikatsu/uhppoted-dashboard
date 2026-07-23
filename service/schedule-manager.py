@@ -186,69 +186,90 @@ def _is_deleted(p):
     return p.get('from') == '2020-01-01' and p.get('to') == '2020-01-02' and not p.get('segments')
 
 
-def api_get_profiles():
-    rc, out, err = _run(['get-time-profiles', CONTROLLER])
-    if rc != 0:
-        return 500, {'error': err or 'cli failed'}
-    profiles = []
-    for line in out.splitlines():
-        line = line.strip()
-        if not line or line.startswith('-') or line.lower().startswith('time profiles') or line.lower().startswith('profile'):
-            continue
-        p = _parse_profile_line(line)
-        if p and not _is_deleted(p):
-            profiles.append(p)
-    return 200, {'profiles': profiles}
+_ALL_WEEK = 'Mon,Tue,Wed,Thu,Fri,Sat,Sun'
 
 
-def api_get_profile(pid):
-    rc, out, err = _run(['get-time-profile', CONTROLLER, str(pid)])
-    if rc != 0:
-        return 404, {'error': 'not found'}
-    for line in out.splitlines():
-        p = _parse_profile_line(line.strip())
-        if p:
-            return 200, p
-    return 404, {'error': 'parse failed'}
-
-
-def api_put_profile(pid, body):
-    """body: {from, to, weekdays[Mon,Tue,..], segments[[start,end],...], linked}"""
-    f = body.get('from', '2026-01-01')
-    t = body.get('to', '2099-12-31')
-    weekdays = body.get('weekdays', [])
-    segments = body.get('segments', [])
-    linked = body.get('linked', 0)
-
-    if not (2 <= int(pid) <= 254):
-        return 400, {'error': 'profile id must be 2..254'}
-
-    wk = ','.join(weekdays) if weekdays else 'Mon,Tue,Wed,Thu,Fri,Sat,Sun'
-    # max 3 segments, default 00:00-00:00
+def _seg_arg(segments):
     segs = []
-    for s in segments[:3]:
+    for s in (segments or [])[:3]:
         if len(s) == 2:
-            segs.append(f'{s[0]}-{s[1]}')
+            segs.append('%s-%s' % (s[0], s[1]))
         else:
             segs.append('00:00-00:00')
     while len(segs) < 3:
         segs.append('00:00-00:00')
-    seg_arg = ','.join(segs)
+    return ','.join(segs)
 
-    rc, out, err = _run(['set-time-profile', CONTROLLER, str(pid),
-                         f'{f}:{t}', wk, seg_arg, str(linked)])
+
+def _apply_profile_to(serial, p, conf=None):
+    """Escribe un perfil de la definicion central en una placa. conf aislado opcional
+    para el path de Publicar; sin conf usa Palmetto por LAN."""
+    wk = ','.join(p['weekdays']) if p.get('weekdays') else _ALL_WEEK
+    args = (['--config', str(conf)] if conf else []) + \
+           ['--timeout', '10s' if conf else '8s', 'set-time-profile', str(serial),
+            str(p['id']), '%s:%s' % (p['from'], p['to']), wk,
+            _seg_arg(p.get('segments')), str(p.get('linked') or 0)]
+    return _run(args, timeout=20 if conf else 12)
+
+
+def _delete_profile_on(serial, pid, conf=None):
+    # el UT0311 no borra por id; se sobrescribe con el centinela expirado (>=2020)
+    args = (['--config', str(conf)] if conf else []) + \
+           ['--timeout', '10s' if conf else '8s', 'set-time-profile', str(serial),
+            str(pid), '2020-01-01:2020-01-02', 'Mon', '00:00-00:00', '0']
+    return _run(args, timeout=20 if conf else 12)
+
+
+def api_get_profiles():
+    return 200, {'profiles': _db_read(_db.time_profiles, [])}
+
+
+def api_get_profile(pid):
+    p = _db_read(lambda c: _db.time_profile(c, pid), None)
+    if p is None:
+        return 404, {'error': 'not found'}
+    return 200, p
+
+
+def api_put_profile(pid, body):
+    """body: {from, to, weekdays[Mon,Tue,..], segments[[start,end],...], linked}.
+    La definicion es del portal (misma para las 5 placas); Palmetto se aplica ya,
+    Teq al Publicar."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return 400, {'error': 'id invalido'}
+    if not 2 <= pid <= 254:
+        return 400, {'error': 'el id debe estar entre 2 y 254'}
+    f = body.get('from', '2026-01-01')
+    t = body.get('to', '2099-12-31')
+    if f < '2020-01-01':
+        return 400, {'error': 'el controlador rechaza fechas anteriores a 2020'}
+    weekdays = [w for w in (body.get('weekdays') or []) if w in _ALL_WEEK.split(',')]
+    if not weekdays:
+        return 400, {'error': 'elegi al menos un dia'}
+    segments = [s for s in (body.get('segments') or []) if len(s) == 2 and s[1] > s[0]]
+    if not segments:
+        return 400, {'error': 'defini al menos una franja valida'}
+    linked = body.get('linked', 0)
+    p = {'id': pid, 'from': f, 'to': t, 'weekdays': weekdays,
+         'segments': segments, 'linked': linked}
+    rc, out, err = _apply_profile_to(CONTROLLER, p)
     if rc != 0:
-        return 500, {'error': err or out or 'cli failed'}
-    return 200, {'ok': True, 'message': out}
+        return 500, {'error': 'no se pudo aplicar en Palmetto: %s' % (err or out or 'cli')}
+    _db_write(lambda c: _db.set_time_profile(c, pid, f, t, weekdays, segments, linked))
+    teq = [s for s in PUBLISH_ORDER if s != CONTROLLER]
+    return 200, {'ok': True, 'id': pid, 'palmetto_applied': True, 'pending_publish': teq}
 
 
 def api_delete_profile(pid):
-    """uhppote-cli has no per-profile delete; we set it to all-zero."""
-    rc, out, err = _run(['set-time-profile', CONTROLLER, str(pid),
-                         '2020-01-01:2020-01-02', 'Mon', '00:00-00:00', '0'])
+    if _db_read(lambda c: _db.time_profile(c, pid), None) is None:
+        return 404, {'error': 'no existe'}
+    rc, out, err = _delete_profile_on(CONTROLLER, pid)
     if rc != 0:
-        return 500, {'error': err or 'cli failed'}
-    return 200, {'ok': True}
+        return 500, {'error': 'no se pudo borrar en Palmetto: %s' % (err or out or 'cli')}
+    _db_write(lambda c: _db.delete_time_profile(c, pid))
+    return 200, {'ok': True, 'id': int(pid), 'pending_publish': [s for s in PUBLISH_ORDER if s != CONTROLLER]}
 
 
 def api_get_card(card):
@@ -1087,32 +1108,36 @@ def _profiles_referenced(tsv):
     return refs
 
 
-def _check_profiles(serial, tsv, conf):
+def _sync_profiles(serial, tsv, conf):
     """El id de perfil viaja DENTRO de la celda del TSV, pero el perfil vive en cada
-    placa por separado: el mismo id puede ser otro horario. Sin esta guarda el publish
-    empuja una referencia rota o distinta sin decir nada. Devuelve None si esta ok."""
+    placa. La definicion central (doors.db) es la unica verdad: si el TSV de esta placa
+    referencia un horario, se ESCRIBE en la placa con la definicion central antes del
+    load-acl, y se verifica. Devuelve None si quedo consistente, o el motivo para abortar
+    esa placa (fail-closed)."""
     refs = _profiles_referenced(tsv)
     if not refs:
         return None
-    ref_defs = _profiles_of(CONTROLLER)          # Palmetto = definicion de referencia
-    if ref_defs is None:
-        return 'no se pudieron leer los horarios de referencia en %s' % CONTROLLER
-    faltan = sorted(r for r in refs if r not in ref_defs)
+    defs = {p['id']: p for p in _db_read(_db.time_profiles, [])}
+    faltan = sorted(r for r in refs if r not in defs)
     if faltan:
-        return 'los horarios %s no existen en %s' % (faltan, CONTROLLER)
-    if str(serial) == CONTROLLER:
-        return None
+        return 'el TSV usa los horarios %s que no estan definidos en el portal' % faltan
     board = _profiles_of(serial, conf)
     if board is None:
-        return 'no se pudieron leer los horarios de la placa para validarlos'
-    problemas = []
+        return 'no se pudieron leer los horarios de la placa para sincronizarlos'
     for r in sorted(refs):
-        if r not in board:
-            problemas.append('el horario %d no existe en esta placa' % r)
-        elif not _same_profile(board[r], ref_defs[r]):
-            problemas.append('el horario %d existe pero es distinto al de %s'
-                             % (r, CONTROLLER))
-    return '; '.join(problemas) if problemas else None
+        if not _same_profile(board.get(r), defs[r]):
+            rc, out, err = _apply_profile_to(serial, defs[r], conf=conf)
+            if rc != 0:
+                return 'no se pudo escribir el horario %d en la placa: %s' % (
+                    r, (err or out or 'cli'))
+    # verificacion post-escritura: releer y confirmar
+    board2 = _profiles_of(serial, conf)
+    if board2 is None:
+        return 'no se pudo releer la placa para confirmar los horarios'
+    malas = [r for r in sorted(refs) if not _same_profile(board2.get(r), defs[r])]
+    if malas:
+        return 'los horarios %s no quedaron iguales a la definicion tras escribirlos' % malas
+    return None
 
 
 def _load_one(serial):
@@ -1126,7 +1151,7 @@ def _load_one(serial):
     for attempt in range(1, retries + 1):
         _warmup_ctrl(serial, conf)
         if attempt == 1:
-            problema = _check_profiles(serial, tsv, conf)
+            problema = _sync_profiles(serial, tsv, conf)
             if problema:
                 return {'ok': False, 'attempts': 0,
                         'error': 'no se publico por seguridad: ' + problema}
@@ -1534,6 +1559,19 @@ def _migrate_json_to_db():
                 _db.set_controller_name(c, serial, name)
             if legacy:
                 done.append('controllers=%d nombres' % len(legacy))
+        # horarios: sembrar la definicion central desde Palmetto (fuente autoritativa hoy)
+        if not c.execute("SELECT 1 FROM time_profiles LIMIT 1").fetchone():
+            rc, out, _e = _run(['get-time-profiles', CONTROLLER])
+            n = 0
+            if rc == 0:
+                for line in out.splitlines():
+                    p = _parse_profile_line(line.strip())
+                    if p and not _is_deleted(p):
+                        _db.set_time_profile(c, p['id'], p['from'], p['to'],
+                                             p['weekdays'], p['segments'], p.get('linked', 0))
+                        n += 1
+            if n:
+                done.append('time_profiles=%d desde Palmetto' % n)
         if done:
             print('migracion JSON -> doors.db: ' + ', '.join(done))
     finally:

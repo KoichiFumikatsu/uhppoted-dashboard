@@ -39,10 +39,10 @@
 <body>
 <div class="head">
   <b>Horarios</b><span class="badge" id="count">—</span>
-  <span class="badge">Sede Palmetto</span>
   <button id="new">Nuevo horario</button>
 </div>
-<div class="note">Un horario define en qué días y franjas abre una tarjeta. Vive <b>dentro del controlador</b>, no en el panel. Se asigna a una puerta desde <b>Tarjetas</b>. Los ids van de 2 a 254. Hoy solo se gestionan los de <b>Palmetto</b>: el microservicio tiene ese controlador fijo.</div>
+<div class="note">Un horario define en qué días y franjas abre una tarjeta. La definición es del portal y vale para las <b>5 placas</b>: al guardar se aplica ya en <b>Palmetto</b>, y en <b>Tequendama</b> se aplica al <b>Publicar</b>. Se asigna a un rol en <b>Publicar</b> o a una puerta desde <b>Tarjetas</b>. Los ids van de 2 a 254 y significan lo mismo en todas las placas.</div>
+<div class="pend" id="pend" style="display:none;background:#3a2c10;border:1px solid #7a5a12;color:#fab219;font-size:12px;padding:6px 20px"></div>
 <div class="grid" id="grid"></div>
 
 <div class="modal" id="modal">
@@ -157,7 +157,14 @@ el("m-save").onclick=async()=>{
   const r=await fetch(`${API}/profile/${pid}`,{method:"PUT",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({from,to,weekdays,segments,linked:0})});
   const d=await r.json().catch(()=>({}));
-  if(r.ok){ el("modal").style.display="none"; load(); }
+  if(r.ok){
+    el("modal").style.display="none";
+    if((d.pending_publish||[]).length){
+      el("pend").style.display="block";
+      el("pend").textContent="Guardado y aplicado en Palmetto. Tequendama toma este horario recién al Publicar.";
+    }
+    load();
+  }
   else el("m-warn").textContent="Error: "+(d.error||r.status);
 };
 async function del(card,pid){
