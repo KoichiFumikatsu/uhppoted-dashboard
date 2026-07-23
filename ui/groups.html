@@ -20,24 +20,66 @@
   .doors{display:flex;flex-wrap:wrap;gap:6px}
   .door{font-size:11px;padding:3px 8px;border-radius:10px;background:#0f1720;border:1px solid #2a3a49;color:#9fb0c0}
   .door.none{opacity:.6;font-style:italic}
+  button{background:#3987e5;color:#04121f;border:none;padding:6px 11px;border-radius:6px;font-weight:600;cursor:pointer;font-size:12px}
+  button.sec{background:#182430;color:#e6edf3;border:1px solid #2a3a49}
+  input{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:2000}
+  .modal .box{background:#182430;border:1px solid #2a3a49;border-radius:10px;padding:20px;width:520px;max-height:88vh;overflow-y:auto}
+  .modal h3{margin:0 0 12px;font-size:15px}
+  .ctrl{margin-top:12px}
+  .ctrl h4{margin:0 0 4px;font-size:12px;color:#9fb0c0;text-transform:uppercase;letter-spacing:.4px}
+  .drow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 0;font-size:13px}
+  .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+  .warn{color:#fab219;font-size:12px;margin-top:8px;min-height:16px}
+  .pend{background:#3a2c10;border:1px solid #7a5a12;color:#fab219;font-size:11px;padding:6px 10px;border-radius:6px;margin:0 20px}
 </style>
 </head>
 <body>
-<div class="head"><b>Grupos</b><span class="badge" id="count">—</span></div>
-<div class="note">Vista de grupos: qué puertas concede cada grupo y cuántas tarjetas lo tienen. Editar grupos/puertas por ahora se hace en el Panel; traer la edición al portal es un paso siguiente.</div>
+<div class="head">
+  <b>Grupos</b><span class="badge" id="count">—</span>
+  <input id="newname" placeholder="Nombre del grupo nuevo">
+  <button id="create">Crear grupo</button>
+</div>
+<div class="note">Un grupo define qué puertas concede a todas las tarjetas que lo tengan. Cambiar las puertas de un grupo afecta a todas sus tarjetas de una vez, así que el push al hardware se hace con <b>Publicar</b>, no al guardar.</div>
+<div class="pend" id="pend" style="display:none"></div>
 <div class="grid" id="grid"></div>
+
+<div class="modal" id="modal">
+  <div class="box">
+    <h3>Puertas de <span id="m-name"></span></h3>
+    <div style="color:#9fb0c0;font-size:12px" id="m-info"></div>
+    <div id="m-doors"></div>
+    <div class="warn" id="m-warn"></div>
+    <div class="actions">
+      <button class="sec" id="m-cancel">Cancelar</button>
+      <button id="m-save">Guardar</button>
+    </div>
+  </div>
+</div>
 
 <link rel="stylesheet" href="/portal/shell.css">
 <script src="/portal/shell.js"></script>
 <script>
 const API="/schedules/api";
-(async function(){
-  const r=await fetch(`${API}/groups`);
-  if(!r.ok){ if(r.status===401) location.href="/portal/login.html"; document.getElementById("grid").innerHTML="<p style='padding:20px;color:#9fb0c0'>Sin acceso a grupos.</p>"; return; }
-  const groups=(await r.json()).groups||[];
-  document.getElementById("count").textContent=groups.length+" grupos";
-  const g=document.getElementById("grid");
-  for(const gr of groups){
+let GROUPS=[], DOORS=[], CUR=null, CANEDIT=false;
+function el(id){return document.getElementById(id);}
+
+async function load(){
+  const [rg,rd,rm] = await Promise.all([
+    fetch(`${API}/groups`), fetch(`${API}/doors`), fetch("/auth/me")
+  ]);
+  if(!rg.ok){ if(rg.status===401) location.href="/portal/login.html";
+    el("grid").innerHTML="<p style='padding:20px;color:#9fb0c0'>Sin acceso a grupos.</p>"; return; }
+  GROUPS=(await rg.json()).groups||[];
+  DOORS=rd.ok?((await rd.json()).doors||[]):[];
+  const me=rm.ok?await rm.json():{caps:[]};
+  CANEDIT=(me.caps||[]).includes("*")||(me.caps||[]).includes("gestionar_grupos");
+  el("create").style.display=CANEDIT?"":"none";
+  el("newname").style.display=CANEDIT?"":"none";
+  el("count").textContent=GROUPS.length+" grupos";
+  const g=el("grid"); g.innerHTML="";
+  for(const gr of GROUPS){
     const c=document.createElement("div"); c.className="card";
     const h=document.createElement("h3"); h.textContent=gr.name||gr.oid; c.appendChild(h);
     const m=document.createElement("div"); m.className="meta";
@@ -46,9 +88,72 @@ const API="/schedules/api";
     if(gr.doors && gr.doors.length){
       gr.doors.forEach(d=>{ const s=document.createElement("span"); s.className="door"; s.textContent=d; dd.appendChild(s); });
     } else { const s=document.createElement("span"); s.className="door none"; s.textContent="sin puertas"; dd.appendChild(s); }
-    c.appendChild(dd); g.appendChild(c);
+    c.appendChild(dd);
+    if(CANEDIT){
+      const row=document.createElement("div"); row.className="row";
+      const ni=document.createElement("input"); ni.value=gr.name||""; ni.style.minWidth="120px";
+      const bn=document.createElement("button"); bn.className="sec"; bn.textContent="Renombrar";
+      bn.onclick=async()=>{
+        const r=await fetch(`${API}/groups-edit/${gr.oid}/name`,{method:"PUT",body:JSON.stringify({name:ni.value.trim()})});
+        if(r.ok) load(); else alert("Error: "+((await r.json().catch(()=>({}))).error||r.status));
+      };
+      const bd=document.createElement("button"); bd.textContent="Puertas";
+      bd.onclick=()=>openDoors(gr);
+      row.appendChild(ni); row.appendChild(bn); row.appendChild(bd);
+      c.appendChild(row);
+    }
+    g.appendChild(c);
   }
-})();
+}
+
+function openDoors(gr){
+  CUR=gr;
+  el("m-name").textContent=gr.name||gr.oid;
+  el("m-info").textContent="Afecta a "+gr.cards+" tarjeta(s). Se aplica al hardware con Publicar.";
+  const dd=el("m-doors"); dd.innerHTML="";
+  const have=new Set(gr.door_oids||[]);
+  let cur=null, box=null;
+  for(const d of DOORS){
+    const serial=d.serial||"";
+    if(serial!==cur){
+      cur=serial; box=document.createElement("div"); box.className="ctrl";
+      const h=document.createElement("h4"); h.textContent=d.ctrl_name||serial||"Puertas";
+      box.appendChild(h); dd.appendChild(box);
+    }
+    const row=document.createElement("div"); row.className="drow";
+    const nm=document.createElement("span"); nm.textContent=(d.number?d.number+" · ":"")+(d.name||d.OID);
+    const ck=document.createElement("input"); ck.type="checkbox"; ck.dataset.oid=d.OID; ck.checked=have.has(d.OID);
+    row.appendChild(nm); row.appendChild(ck); box.appendChild(row);
+  }
+  el("m-warn").textContent="";
+  el("modal").style.display="flex";
+}
+el("m-cancel").onclick=()=>{ el("modal").style.display="none"; };
+el("m-save").onclick=async()=>{
+  const have=new Set(CUR.door_oids||[]), doors={};
+  el("m-doors").querySelectorAll("input").forEach(i=>{
+    if(i.checked!==have.has(i.dataset.oid)) doors[i.dataset.oid]=i.checked;
+  });
+  if(!Object.keys(doors).length){ el("modal").style.display="none"; return; }
+  const quita=Object.values(doors).filter(v=>!v).length;
+  if(quita && !confirm("Vas a QUITAR "+quita+" puerta(s) a "+CUR.cards+" tarjetas. Continuar?")) return;
+  const r=await fetch(`${API}/groups-edit/${CUR.oid}/doors`,{method:"PUT",body:JSON.stringify({doors})});
+  const d=await r.json().catch(()=>({}));
+  if(r.ok){
+    el("modal").style.display="none";
+    el("pend").style.display="block";
+    el("pend").textContent="Grupo actualizado ("+d.cards_afectadas+" tarjetas). Los controladores NO cambian hasta que uses Publicar.";
+    load();
+  }else{ el("m-warn").textContent="Error: "+(d.error||r.status); }
+};
+el("create").onclick=async()=>{
+  const name=el("newname").value.trim();
+  if(!name) return;
+  const r=await fetch(`${API}/groups-edit`,{method:"POST",body:JSON.stringify({name})});
+  if(r.ok){ el("newname").value=""; load(); }
+  else alert("Error: "+((await r.json().catch(()=>({}))).error||r.status));
+};
+load();
 </script>
 </body>
 </html>

@@ -322,10 +322,21 @@ def api_doors():
         data = json.load(f)
     doors = data.get('doors', [])
     ov = _door_name_overrides()
+    owner = {}                      # door_oid -> (serial, numero) para agrupar por placa
+    for c in _controllers():
+        for num, oid in c['doors'].items():
+            owner[str(oid)] = (c['serial'], str(num))
+    cnames = dict(CONTROLLERS_META)
+    cnames.update(_name_overrides())
     for d in doors:
         oid = str(d.get('OID', ''))
         if oid in ov:
             d['name'] = ov[oid]
+        serial, num = owner.get(oid, (None, None))
+        d['serial'] = serial
+        d['number'] = num
+        d['ctrl_name'] = cnames.get(serial, serial)
+    doors.sort(key=lambda d: (str(d.get('serial') or 'zz'), int(d.get('number') or 0)))
     return 200, {'doors': doors}
 
 
@@ -465,6 +476,7 @@ def api_groups():
     for oid, g in groups.items():
         out.append({'oid': oid, 'name': g['name'],
                     'doors': sorted(dmap.get(d, d) for d in g['doors']),
+                    'door_oids': sorted(g['doors']),
                     'cards': counts.get(oid, 0)})
     out.sort(key=lambda x: x['name'])
     return 200, {'groups': out}
@@ -767,6 +779,63 @@ def api_delete_card(card):
     rc, out, err = _run(['--timeout', '6s', 'delete-card', PALMETTO, str(card)], timeout=10)
     return 200, {'ok': True, 'card': str(card), 'palmetto_deleted': rc == 0,
                  'palmetto_error': None if rc == 0 else (err or out or 'cli failed'),
+                 'pending_publish': True}
+
+
+def _group_card_count(goid):
+    data = _load_json(CARDS_JSON, {})
+    cards = data.get('cards', []) if isinstance(data, dict) else data
+    return sum(1 for c in cards if goid in (c.get('groups') or []))
+
+
+def api_create_group(body):
+    name = (body.get('name') or '').strip()
+    if not name:
+        return 400, {'error': 'nombre vacio'}
+    try:
+        r = _panel_post('/groups', {'created': [{'oid': '0.5.0', 'value': ''}]})
+        oid = next((o['OID'] for o in r.get('groups', []) if o.get('value') == 'new'), None)
+        if not oid:
+            return 502, {'error': 'el panel no devolvio OID para el grupo nuevo'}
+        _panel_post('/groups', {'updated': [{'oid': oid + '.1', 'value': name}]})
+    except RuntimeError as e:
+        return 502, {'error': str(e)}
+    return 200, {'ok': True, 'oid': oid, 'name': name}
+
+
+def api_set_group_name(goid, body):
+    if goid not in _groups():
+        return 404, {'error': 'grupo no encontrado'}
+    name = (body.get('name') or '').strip()
+    if not name:
+        return 400, {'error': 'nombre vacio'}
+    try:
+        _panel_post('/groups', {'updated': [{'oid': goid + '.1', 'value': name}]})
+    except RuntimeError as e:
+        return 502, {'error': str(e)}
+    return 200, {'ok': True, 'oid': goid, 'name': name}
+
+
+def api_set_group_doors(goid, body):
+    """body: {doors:{'<door_oid>': true|false}} — solo las puertas indicadas se tocan."""
+    if goid not in _groups():
+        return 404, {'error': 'grupo no encontrado'}
+    valid = {str(oid) for c in _controllers() for oid in c['doors'].values()}
+    updated = []
+    for doid, on in (body.get('doors') or {}).items():
+        if str(doid) not in valid:
+            return 400, {'error': 'puerta desconocida: %s' % doid}
+        updated.append({'oid': '%s.2.%s' % (goid, str(doid).split('.')[-1]),
+                        'value': 'true' if on else 'false'})
+    if not updated:
+        return 400, {'error': 'sin puertas'}
+    try:
+        _panel_post('/groups', {'updated': updated})
+    except RuntimeError as e:
+        return 502, {'error': str(e)}
+    # a diferencia de una tarjeta suelta, esto cambia el efectivo de todas las
+    # tarjetas del grupo: el push masivo es trabajo de Publicar, no de aca
+    return 200, {'ok': True, 'oid': goid, 'cards_afectadas': _group_card_count(goid),
                  'pending_publish': True}
 
 
@@ -1218,6 +1287,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._write(p, 'PUT', api_put_card(p.split('/')[-1], body), body)
         if p.startswith('/api/doors/') and p.endswith('/name'):
             return self._write(p, 'PUT', api_set_door_name(p.split('/')[3], body), body)
+        if p.startswith('/api/groups-edit/') and p.endswith('/name'):
+            return self._write(p, 'PUT', api_set_group_name(p.split('/')[3], body), body)
+        if p.startswith('/api/groups-edit/') and p.endswith('/doors'):
+            return self._write(p, 'PUT', api_set_group_doors(p.split('/')[3], body), body)
         if p.startswith('/api/controllers/') and p.endswith('/name'):
             return self._write(p, 'PUT', api_set_controller_name(p.split('/')[3], body), body)
         if p == '/api/role-profiles':
@@ -1241,6 +1314,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._write(p, 'POST', api_bulk_card_doors(body), body)
         if p == '/api/bulk-cards':
             return self._write(p, 'POST', api_bulk_cards(body), body)
+        if p == '/api/groups-edit':
+            return self._write(p, 'POST', api_create_group(body), body)
         if p == '/api/publish':
             return self._write(p, 'POST', api_publish(body), body)
         if p == '/api/controllers-refresh':

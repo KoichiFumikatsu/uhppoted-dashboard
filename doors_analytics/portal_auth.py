@@ -78,6 +78,9 @@ _RULES = [
     ("/analytics/api", "ver_eventos"),
     ("/analytics", "ver_eventos"),
     ("/schedules/api/logs", "ver_logs"),
+    # ruta separada para escritura: el gating es por path, no por metodo, y GET
+    # /api/groups lo necesita cualquiera con editar_tarjetas
+    ("/schedules/api/groups-edit", "gestionar_grupos"),
     ("/schedules/api/profile", "editar_horarios"),
     ("/schedules/api/card", "editar_tarjetas"),
     ("/schedules/api/bulk-assign", "editar_tarjetas"),
@@ -108,6 +111,7 @@ CAPS = [
     ("ver_dashboard", "Ver Dashboard"),
     ("editar_tarjetas", "Editar Tarjetas"),
     ("editar_horarios", "Editar Horarios"),
+    ("gestionar_grupos", "Gestionar Grupos (puertas que concede)"),
     ("publicar_acl", "Publicar ACL a controladores"),
     ("gestionar_controladores", "Gestionar Controladores"),
     ("abrir_puerta", "Abrir Puerta"),
