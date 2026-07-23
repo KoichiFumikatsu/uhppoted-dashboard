@@ -98,24 +98,31 @@ _HW_ERR = ('error', 'invalid', 'usage', 'false')
 _HW_CONF = '/etc/uhppoted/uhppoted.conf'
 
 
+def _hw_ok(text):
+    """El CLI devuelve rc=0 hasta en error: el exito se decide por la SALIDA."""
+    return not any(t in text.lower() for t in _HW_ERR)
+
+
 def _run_hw(serial, cmd_args, want_true=False, tries=3):
     """Comando de ESCRITURA a un controlador. Dos cosas que _run pelado no hacia:
-    (1) pasa --config, sin el cual Palmetto anda por broadcast pero Teq (Tailscale)
-        es inalcanzable; (2) valida la SALIDA, porque uhppote-cli devuelve rc=0 hasta
-        con comando o parametro invalido (asi el bug de 'open-door' devolvia 200 sin
-        abrir). warmup por get-device: el 1er paquete a Teq tras idle se cae."""
+    (1) pasa --config, ruta dirigida explicita (Palmetto por LAN, Teq por Tailscale)
+        en vez de depender del broadcast; (2) valida la SALIDA, porque uhppote-cli
+        devuelve rc=0 hasta con comando o parametro invalido (asi el bug de 'open-door'
+        devolvia 200 sin abrir). warmup solo para Teq: el 1er paquete tras idle se cae;
+        Palmetto es LAN y el warmup solo ralentizaria los lotes."""
+    warmup = str(serial) != PALMETTO
     text = ''
     for _ in range(tries):
-        _run(['--config', _HW_CONF, '--timeout', '3s', 'get-device', str(serial)], timeout=6)
+        if warmup:
+            _run(['--config', _HW_CONF, '--timeout', '3s', 'get-device', str(serial)], timeout=6)
         rc, out, err = _run(['--config', _HW_CONF, '--timeout', '6s'] + cmd_args, timeout=12)
         text = (out + ' ' + err).strip()
-        low = text.lower()
-        if any(t in low for t in _HW_ERR):
+        if not _hw_ok(text):
             return False, text            # error deterministico: no reintentar
-        if want_true:
-            if 'true' in low:
-                return True, text
-            continue                       # sin 'true' ni error: reintentar (warmup Teq)
+        if want_true and 'true' not in text.lower():
+            if not warmup:
+                return False, text or 'el controlador no confirmo (sin "true")'
+            continue                       # Teq: reintentar por si fue warmup
         return True, text
     return False, text or 'sin respuesta'
 
@@ -229,21 +236,28 @@ def _seg_arg(segments):
 
 def _apply_profile_to(serial, p, conf=None):
     """Escribe un perfil de la definicion central en una placa. conf aislado opcional
-    para el path de Publicar; sin conf usa Palmetto por LAN."""
+    para el path de Publicar; por defecto el conf global. Valida por SALIDA
+    (set-time-profile devuelve rc=0 en error): exito = 'created'. -> (ok, text)."""
     wk = ','.join(p['weekdays']) if p.get('weekdays') else _ALL_WEEK
-    args = (['--config', str(conf)] if conf else []) + \
-           ['--timeout', '10s' if conf else '8s', 'set-time-profile', str(serial),
+    args = ['--config', str(conf or _HW_CONF),
+            '--timeout', '10s', 'set-time-profile', str(serial),
             str(p['id']), '%s:%s' % (p['from'], p['to']), wk,
             _seg_arg(p.get('segments')), str(p.get('linked') or 0)]
-    return _run(args, timeout=20 if conf else 12)
+    rc, out, err = _run(args, timeout=20)
+    text = (out + ' ' + err).strip()
+    # positivo: set-time-profile confirma con 'created' (hasta idempotente). Mas fuerte
+    # que 'ausencia de ERROR', por si un fallo no trae el prefijo habitual.
+    return ('created' in text.lower() and _hw_ok(text)), text
 
 
 def _delete_profile_on(serial, pid, conf=None):
     # el UT0311 no borra por id; se sobrescribe con el centinela expirado (>=2020)
-    args = (['--config', str(conf)] if conf else []) + \
-           ['--timeout', '10s' if conf else '8s', 'set-time-profile', str(serial),
+    args = ['--config', str(conf or _HW_CONF),
+            '--timeout', '10s', 'set-time-profile', str(serial),
             str(pid), '2020-01-01:2020-01-02', 'Mon', '00:00-00:00', '0']
-    return _run(args, timeout=20 if conf else 12)
+    rc, out, err = _run(args, timeout=20)
+    text = (out + ' ' + err).strip()
+    return ('created' in text.lower() and _hw_ok(text)), text
 
 
 def api_get_profiles():
@@ -280,9 +294,9 @@ def api_put_profile(pid, body):
     linked = body.get('linked', 0)
     p = {'id': pid, 'from': f, 'to': t, 'weekdays': weekdays,
          'segments': segments, 'linked': linked}
-    rc, out, err = _apply_profile_to(CONTROLLER, p)
-    if rc != 0:
-        return 500, {'error': 'no se pudo aplicar en Palmetto: %s' % (err or out or 'cli')}
+    ok, text = _apply_profile_to(CONTROLLER, p)
+    if not ok:
+        return 500, {'error': 'no se pudo aplicar en Palmetto: %s' % (text or 'cli')}
     _db_write(lambda c: _db.set_time_profile(c, pid, f, t, weekdays, segments, linked))
     teq = [s for s in PUBLISH_ORDER if s != CONTROLLER]
     return 200, {'ok': True, 'id': pid, 'palmetto_applied': True, 'pending_publish': teq}
@@ -291,15 +305,15 @@ def api_put_profile(pid, body):
 def api_delete_profile(pid):
     if _db_read(lambda c: _db.time_profile(c, pid), None) is None:
         return 404, {'error': 'no existe'}
-    rc, out, err = _delete_profile_on(CONTROLLER, pid)
-    if rc != 0:
-        return 500, {'error': 'no se pudo borrar en Palmetto: %s' % (err or out or 'cli')}
+    ok, text = _delete_profile_on(CONTROLLER, pid)
+    if not ok:
+        return 500, {'error': 'no se pudo borrar en Palmetto: %s' % (text or 'cli')}
     _db_write(lambda c: _db.delete_time_profile(c, pid))
     return 200, {'ok': True, 'id': int(pid), 'pending_publish': [s for s in PUBLISH_ORDER if s != CONTROLLER]}
 
 
 def api_get_card(card):
-    rc, out, err = _run(['get-card', CONTROLLER, str(card)])
+    rc, out, err = _run(['--config', _HW_CONF, 'get-card', CONTROLLER, str(card)])
     if rc != 0:
         return 404, {'error': 'card not found'}
     for line in out.splitlines():
@@ -329,10 +343,11 @@ def api_put_card(card, body):
             except (ValueError, TypeError):
                 pass
     doors_arg = ','.join(parts) if parts else ''
-    rc, out, err = _run(['put-card', CONTROLLER, str(card), f, t, doors_arg])
-    if rc != 0:
-        return 500, {'error': err or out or 'cli failed'}
-    return 200, {'ok': True, 'message': out}
+    ok, text = _run_hw(CONTROLLER, ['put-card', CONTROLLER, str(card), f, t, doors_arg],
+                       want_true=True)
+    if not ok:
+        return 500, {'error': text or 'cli failed'}
+    return 200, {'ok': True, 'message': text}
 
 
 def api_bulk_assign(body):
@@ -956,9 +971,9 @@ def api_delete_card(card):
     except sqlite3.Error:
         pass
     # revocacion inmediata en Palmetto; Teq sale al publicar (load-acl borra las no listadas)
-    rc, out, err = _run(['--timeout', '6s', 'delete-card', PALMETTO, str(card)], timeout=10)
-    return 200, {'ok': True, 'card': str(card), 'palmetto_deleted': rc == 0,
-                 'palmetto_error': None if rc == 0 else (err or out or 'cli failed'),
+    ok, text = _run_hw(PALMETTO, ['delete-card', PALMETTO, str(card)], want_true=True)
+    return 200, {'ok': True, 'card': str(card), 'palmetto_deleted': ok,
+                 'palmetto_error': None if ok else (text or 'cli failed'),
                  'pending_publish': True}
 
 
@@ -1135,8 +1150,8 @@ def _parse_loadacl(text):
 def _profiles_of(serial, conf=None):
     """{id: perfil} leidos de una placa. None si no se pudo leer (no vacio: hay que
     distinguir 'no tiene perfiles' de 'no contesto')."""
-    args = (['--config', str(conf)] if conf else []) + \
-           ['--timeout', '10s', 'get-time-profiles', str(serial)]
+    args = ['--config', str(conf or _HW_CONF),
+            '--timeout', '10s', 'get-time-profiles', str(serial)]
     rc, out, err = _run(args, timeout=20)
     if rc != 0 or 'Profile' not in out:
         return None
@@ -1187,10 +1202,9 @@ def _sync_profiles(serial, tsv, conf):
         return 'no se pudieron leer los horarios de la placa para sincronizarlos'
     for r in sorted(refs):
         if not _same_profile(board.get(r), defs[r]):
-            rc, out, err = _apply_profile_to(serial, defs[r], conf=conf)
-            if rc != 0:
-                return 'no se pudo escribir el horario %d en la placa: %s' % (
-                    r, (err or out or 'cli'))
+            ok, text = _apply_profile_to(serial, defs[r], conf=conf)
+            if not ok:
+                return 'no se pudo escribir el horario %d en la placa: %s' % (r, text or 'cli')
     # verificacion post-escritura: releer y confirmar
     board2 = _profiles_of(serial, conf)
     if board2 is None:
@@ -1322,7 +1336,7 @@ def _pull_one(serial, name):
     info = {'serial': serial, 'name': name, 'online': False, 'ip': None,
             'firmware': None, 'cards': None, 'updated': _now_str(), 'pending': False}
     for _ in range(6):
-        rc, out, err = _run(['--timeout', '3s', 'get-device', serial], timeout=6)
+        rc, out, err = _run(['--config', _HW_CONF, '--timeout', '3s', 'get-device', serial], timeout=6)
         p = out.split()
         if rc == 0 and len(p) >= 6 and p[0] == serial:
             info['online'] = True
@@ -1332,7 +1346,7 @@ def _pull_one(serial, name):
     if info['online']:
         best = 0
         for _ in range(3):
-            rc, out, err = _run(['--timeout', '6s', 'get-cards', serial], timeout=14)
+            rc, out, err = _run(['--config', _HW_CONF, '--timeout', '6s', 'get-cards', serial], timeout=14)
             n = len([l for l in out.splitlines() if l[:1].isdigit()])
             if n > best:
                 best = n
@@ -1624,7 +1638,7 @@ def _migrate_json_to_db():
                 done.append('controllers=%d nombres' % len(legacy))
         # horarios: sembrar la definicion central desde Palmetto (fuente autoritativa hoy)
         if not c.execute("SELECT 1 FROM time_profiles LIMIT 1").fetchone():
-            rc, out, _e = _run(['get-time-profiles', CONTROLLER])
+            rc, out, _e = _run(['--config', _HW_CONF, 'get-time-profiles', CONTROLLER])
             n = 0
             if rc == 0:
                 for line in out.splitlines():
