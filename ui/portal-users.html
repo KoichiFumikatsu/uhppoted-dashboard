@@ -11,7 +11,8 @@ button{background:#3987e5;color:#04121f;border:none;padding:8px 12px;border-radi
 button.sec{background:#182430;color:#e6edf3;border:1px solid #2a3a49}
 label.cap{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:#9fb0c0;margin:3px 10px 3px 0}
 table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #2a3a49}
-</style></head><body>
+</style>  <link rel="stylesheet" href="/portal/shell.css">
+</head><body>
 <header><b>Usuarios</b> &nbsp; <a href="/portal/">‹ Volver</a></header>
 <div class="wrap">
  <div class="card"><h3>Nuevo usuario</h3>
@@ -22,22 +23,49 @@ table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}td,th{te
  <div class="card"><h3>Existentes</h3><table id="tbl"><thead><tr><th>Usuario</th><th>Nombre</th><th>Capacidades</th><th></th></tr></thead><tbody></tbody></table></div>
 </div>
 <script>
-let CAPS=[];
+let CAPS=[], ME={username:"",caps:[]};
 function capsChecklist(container,selected){container.innerHTML="";CAPS.forEach(([k,label])=>{
   const l=document.createElement("label");l.className="cap";
   const c=document.createElement("input");c.type="checkbox";c.value=k;c.checked=selected.includes(k)||selected.includes("*");
   l.appendChild(c);l.appendChild(document.createTextNode(label));container.appendChild(l);});}
 function readChecklist(container){return [...container.querySelectorAll("input:checked")].map(c=>c.value);}
+function btn(text,sec,fn){const b=document.createElement("button");b.textContent=text;if(sec)b.className="sec";b.onclick=fn;return b;}
+
+function editRow(tr,u,canEditCaps,reason){
+  tr.innerHTML="";
+  const td=document.createElement("td");td.colSpan=4;
+  const name=document.createElement("input");name.value=u.name||"";name.placeholder="Nombre";
+  td.appendChild(document.createTextNode(u.username+"  "));td.appendChild(name);
+  let caps=null;
+  if(canEditCaps){caps=document.createElement("div");capsChecklist(caps,u.caps);td.appendChild(caps);}
+  else{const n=document.createElement("div");n.className="cap";n.textContent=reason;td.appendChild(n);}
+  const row=document.createElement("div");
+  row.appendChild(btn("Guardar",false,async()=>{
+    const body={};
+    if(name.value.trim()) body.name=name.value.trim();
+    if(caps) body.caps=readChecklist(caps);
+    const r=await fetch("/auth/users/"+encodeURIComponent(u.username),{method:"PUT",body:JSON.stringify(body)});
+    if(r.ok) load(); else alert("Error: "+((await r.json().catch(()=>({}))).error||r.status));
+  }));
+  row.appendChild(btn("Cancelar",true,load));
+  td.appendChild(row);tr.appendChild(td);
+}
+
 async function load(){
   const rc=await fetch("/auth/caps"); CAPS=await rc.json(); capsChecklist(document.getElementById("ncaps"),[]);
+  const rm=await fetch("/auth/me"); if(rm.ok) ME=await rm.json();
   const r=await fetch("/auth/users"); if(!r.ok){location.href="/portal/login.html";return;}
   const users=await r.json(); const tb=document.querySelector("#tbl tbody"); tb.innerHTML="";
   users.forEach(u=>{const tr=document.createElement("tr");
     [u.username,u.name,(u.caps.includes("*")?"TODO":u.caps.join(", "))].forEach(v=>{const td=document.createElement("td");td.textContent=v;tr.appendChild(td)});
     const td=document.createElement("td");
-    const del=document.createElement("button");del.className="sec";del.textContent="Borrar";
-    del.onclick=async()=>{if(confirm("Borrar "+u.username+"?")){await fetch("/auth/users/"+u.username,{method:"DELETE"});load();}};
-    if(!u.caps.includes("*")) td.appendChild(del);
+    const isStar=u.caps.includes("*"), meStar=ME.caps.includes("*");
+    // sin '*' el checklist reemplazaria el comodin por capacidades explicitas = degradacion silenciosa
+    const canEditCaps=!isStar&&(meStar||u.username!==ME.username);
+    const reason=isStar?"Super-admin: capacidades no editables aquí.":"No puede editar sus propias capacidades.";
+    td.appendChild(btn("Editar",true,()=>editRow(tr,u,canEditCaps,reason)));
+    if(!isStar) td.appendChild(btn("Borrar",true,async()=>{
+      if(confirm("Borrar "+u.username+"?")){await fetch("/auth/users/"+encodeURIComponent(u.username),{method:"DELETE"});load();}}));
     tr.appendChild(td);tb.appendChild(tr);});
 }
 document.getElementById("create").onclick=async()=>{
@@ -46,4 +74,5 @@ document.getElementById("create").onclick=async()=>{
   if(r.ok){nu.value=nn.value=np.value="";load();}else{alert("Error: "+(await r.json()).error);}
 };
 load();
-</script></body></html>
+</script>  <script src="/portal/shell.js"></script>
+</body></html>
