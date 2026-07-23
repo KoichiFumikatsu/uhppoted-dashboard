@@ -226,13 +226,21 @@ el("m-doors").onchange=()=>{
 el("m-save").onclick=async()=>{
   const doors={};
   el("m-doors").querySelectorAll("select").forEach(s=>{ if(s.value) doors[s.dataset.oid]=s.value; });
-  const body={ from: el("m-from").value, to: el("m-to").value, doors };
-  const r=await fetch(`${API}/card-doors/${CUR.card}`,{method:"PUT",body:JSON.stringify(body)});
-  const d=await r.json().catch(()=>({}));
-  if(r.ok){
+  const newFrom=el("m-from").value, newTo=el("m-to").value;
+  const datesChanged = newFrom!==(CUR.from||"").slice(0,10) || newTo!==(CUR.to||"").slice(0,10);
+  el("m-warn").className="warn"; el("m-warn").textContent="Guardando…";
+  try{
+    // las fechas son del modelo del panel: van por su endpoint y persisten al Publicar
+    if(datesChanged){
+      const rd=await fetch(`${API}/card/${CUR.card}/dates`,{method:"PUT",body:JSON.stringify({from:newFrom,to:newTo})});
+      if(!rd.ok) throw new Error((await rd.json().catch(()=>({}))).error||rd.status);
+    }
+    const r=await fetch(`${API}/card-doors/${CUR.card}`,{method:"PUT",body:JSON.stringify({doors})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.error||r.status);
     el("modal").style.display="none";
     if((d.pending_publish||[]).length) alert("Guardado. Palmetto aplicado.\nPendiente de Publicar: "+d.pending_publish.join(", "));
-  }else{ alert("Error: "+(d.error||r.status)); }
+  }catch(e){ el("m-warn").textContent="Error: "+e.message; }
 };
 // ---- editar tarjeta: nombre, grupos, borrar ----
 let EDIT=null;

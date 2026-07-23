@@ -754,13 +754,11 @@ def api_put_card_doors(card, body):
         return code, eff
     pal = lambda m: {r['number']: r['value'] for r in m['doors'] if r['serial'] == PALMETTO}
     pdoors = pal(eff)
-    dates_changed = ((body.get('from') or eff['from']) != eff['from']
-                     or (body.get('to') or eff['to']) != eff['to'])
-    # sin cambio efectivo en Palmetto no tiene sentido golpear el hardware (lotes grandes)
-    if pdoors and (pdoors != pal(before) or dates_changed):
-        # from/to no tienen override: van al hardware pero el panel los repone al publicar
-        c2, r2 = api_put_card(card, {'from': body.get('from') or eff['from'],
-                                     'to': body.get('to') or eff['to'], 'doors': pdoors})
+    # las fechas from/to salen del panel (cards.json); se editan por api_set_card_dates,
+    # no por aca. Sin cambio efectivo en Palmetto no se golpea el hardware (lotes grandes).
+    force = bool(body.get('_force_palmetto'))
+    if pdoors and (pdoors != pal(before) or force):
+        c2, r2 = api_put_card(card, {'from': eff['from'], 'to': eff['to'], 'doors': pdoors})
         if c2 != 200:
             return 500, {'error': 'override guardado pero fallo el push a Palmetto: %s'
                                   % r2.get('error', ''), 'saved': True}
@@ -872,14 +870,53 @@ def api_set_card_groups(card, body):
         _panel_post('/cards', {'updated': updated})
     except RuntimeError as e:
         return 502, {'error': str(e)}
-    # el grupo cambia el efectivo: repropagar Palmetto (el panel no empuja solo)
+    # el grupo cambia el efectivo: repropagar Palmetto solo si de verdad cambia el
+    # acceso (a diferencia de las fechas, aca las puertas SI pueden cambiar)
     keep = _card_overrides(card).get(str(card)) or {}
     code, resp = api_put_card_doors(card, {'doors': keep})
+    # el cambio de grupo esta en cards.json (=> en el TSV): Teq lo toma al Publicar
+    teq = [s for s in PUBLISH_ORDER if s != PALMETTO]
     if code != 200:
-        return 200, {'ok': True, 'card': str(card), 'palmetto_warning': resp.get('error')}
+        return 200, {'ok': True, 'card': str(card), 'pending_publish': teq,
+                     'palmetto_warning': resp.get('error')}
     return 200, {'ok': True, 'card': str(card),
                  'palmetto_applied': resp.get('palmetto_applied'),
-                 'pending_publish': resp.get('pending_publish')}
+                 'pending_publish': teq}
+
+
+def api_set_card_dates(card, body):
+    """Vigencia de la tarjeta: son del modelo del panel (cards.json oid.3/.4), por eso
+    van por su API y persisten al Publicar. Palmetto se aplica de una."""
+    cd = _card_record(card)
+    if cd is None:
+        return 404, {'error': 'la tarjeta no esta en el panel'}
+    frm = (body.get('from') or '').strip()
+    to = (body.get('to') or '').strip()
+    for lbl, v in (('desde', frm), ('hasta', to)):
+        if not _re.match(r'^\d{4}-\d{2}-\d{2}$', v):
+            return 400, {'error': 'fecha %s invalida (se espera AAAA-MM-DD)' % lbl}
+    if frm < '2020-01-01':
+        return 400, {'error': 'el controlador rechaza fechas anteriores a 2020'}
+    if to < frm:
+        return 400, {'error': 'la fecha hasta no puede ser anterior a desde'}
+    try:
+        _panel_post('/cards', {'updated': [{'oid': cd['OID'] + '.3', 'value': frm},
+                                           {'oid': cd['OID'] + '.4', 'value': to}]})
+    except RuntimeError as e:
+        return 502, {'error': str(e)}
+    # el panel no empuja solo: aplicar Palmetto con las fechas nuevas (force por si el
+    # acceso por puerta no cambio)
+    keep = _card_overrides(card).get(str(card)) or {}
+    code, resp = api_put_card_doors(card, {'doors': keep, '_force_palmetto': True})
+    # la fecha esta en cards.json (=> en el TSV): Teq la toma al Publicar, aunque no
+    # haya overrides de puerta. Senalar la placa evita creer que ya quedo en todas.
+    teq = [s for s in PUBLISH_ORDER if s != PALMETTO]
+    if code != 200:
+        return 200, {'ok': True, 'card': str(card), 'from': frm, 'to': to,
+                     'pending_publish': teq, 'palmetto_warning': resp.get('error')}
+    return 200, {'ok': True, 'card': str(card), 'from': frm, 'to': to,
+                 'palmetto_applied': resp.get('palmetto_applied'),
+                 'pending_publish': teq}
 
 
 def api_delete_card(card):
@@ -1477,6 +1514,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._write(p, 'PUT', api_set_card_name(p.split('/')[3], body), body)
         if p.startswith('/api/card/') and p.endswith('/groups'):
             return self._write(p, 'PUT', api_set_card_groups(p.split('/')[3], body), body)
+        if p.startswith('/api/card/') and p.endswith('/dates'):
+            return self._write(p, 'PUT', api_set_card_dates(p.split('/')[3], body), body)
         if p.startswith('/api/card/'):
             return self._write(p, 'PUT', api_put_card(p.split('/')[-1], body), body)
         if p.startswith('/api/doors/') and p.endswith('/name'):
