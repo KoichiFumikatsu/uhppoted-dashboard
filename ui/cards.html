@@ -27,6 +27,7 @@
   .drow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 0;font-size:13px}
   .drow .inh{font-size:11px;color:#6f8296}
   .pend{background:#3a2c10;border:1px solid #7a5a12;color:#fab219;font-size:11px;padding:4px 8px;border-radius:6px;margin-top:10px}
+  .bulkbar{display:flex;gap:10px;align-items:center;padding:10px 0;font-size:12px;color:#9fb0c0}
   .modal h3{margin:0 0 12px;font-size:15px}
   .modal label{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#9fb0c0;margin:8px 0}
   .modal input,.modal select{background:#0f1720;border:1px solid #2a3a49;color:#e6edf3;padding:6px 8px;border-radius:6px;font-size:13px}
@@ -45,8 +46,14 @@
 </div>
 <div class="note">Por defecto cada puerta hereda del <b>grupo</b> de la tarjeta. Si le das un valor propio queda como <b>permiso especial</b> y sobrevive a Publicar. Palmetto se aplica al instante; Tequendama se aplica al <b>Publicar</b>. Poner una puerta en <b>Niega</b> revoca acceso; si esa puerta comparte lector de entrada/salida, puede <b>encerrar</b> a la persona.</div>
 <div class="wrap">
+  <div class="bulkbar" id="bulkbar">
+    <span id="selcount">0 seleccionadas</span>
+    <button class="sec" id="selall">Seleccionar los filtrados</button>
+    <button class="sec" id="selnone">Limpiar</button>
+    <button id="bulkbtn">Permisos en lote</button>
+  </div>
   <table>
-    <thead><tr><th>Tarjeta</th><th>Desde</th><th>Hasta</th><th>Grupos</th><th></th></tr></thead>
+    <thead><tr><th><input type="checkbox" id="chkall"></th><th>Tarjeta</th><th>Desde</th><th>Hasta</th><th>Grupos</th><th></th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
 </div>
@@ -63,6 +70,19 @@
     <div class="actions">
       <button class="sec" id="m-cancel">Cancelar</button>
       <button id="m-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="bmodal">
+  <div class="box">
+    <h3>Permisos en lote — <span id="b-count"></span></h3>
+    <div style="color:#9fb0c0;font-size:12px">Solo se aplican las puertas que cambies. “Sin cambio” deja la puerta como está en cada tarjeta.</div>
+    <div id="b-doors"></div>
+    <div class="warn" id="b-warn"></div>
+    <div class="actions">
+      <button class="sec" id="b-cancel">Cancelar</button>
+      <button id="b-save">Aplicar</button>
     </div>
   </div>
 </div>
@@ -87,6 +107,10 @@ function render(){
   const tb = el("rows"); tb.innerHTML = "";
   for(const c of rows.slice(0,500)){
     const tr = document.createElement("tr");
+    const tdc=document.createElement("td");
+    const ck=document.createElement("input"); ck.type="checkbox"; ck.checked=SEL.has(String(c.card));
+    ck.onchange=()=>{ ck.checked?SEL.add(String(c.card)):SEL.delete(String(c.card)); updSel(); };
+    tdc.appendChild(ck); tr.appendChild(tdc);
     const g = (c.groups||[]).length;
     [String(c.card||""), c.from||"", c.to||"", g ? (g+" grupo"+(g>1?"s":"")) : "—"].forEach(v=>{
       const td=document.createElement("td"); td.textContent=v; tr.appendChild(td);
@@ -96,8 +120,17 @@ function render(){
     b.onclick=()=>openCard(c.card); td.appendChild(b); tr.appendChild(td);
     tb.appendChild(tr);
   }
+  updSel();
 }
 el("search").oninput = render;
+
+// ---- seleccion + lote ----
+const SEL = new Set();
+function filtered(){ const q=el("search").value.trim(); return q?ALL.filter(c=>String(c.card).includes(q)):ALL; }
+function updSel(){ el("selcount").textContent = SEL.size+" seleccionadas"; el("bulkbtn").disabled = SEL.size===0; }
+el("selall").onclick=()=>{ filtered().forEach(c=>SEL.add(String(c.card))); render(); };
+el("selnone").onclick=()=>{ SEL.clear(); render(); };
+el("chkall").onchange=()=>{ el("chkall").checked ? filtered().forEach(c=>SEL.add(String(c.card))) : SEL.clear(); render(); };
 
 let CUR = null;
 function label(v){ return v==="Y" ? "Concede" : v==="N" ? "Niega" : "Horario "+v; }
@@ -161,6 +194,51 @@ el("m-save").onclick=async()=>{
     el("modal").style.display="none";
     if((d.pending_publish||[]).length) alert("Guardado. Palmetto aplicado.\nPendiente de Publicar: "+d.pending_publish.join(", "));
   }else{ alert("Error: "+(d.error||r.status)); }
+};
+el("bulkbtn").onclick=async()=>{
+  const first=[...SEL][0];
+  const r=await fetch(`${API}/card-doors/${first}`);
+  if(!r.ok){ alert("No se pudo leer la estructura de puertas."); return; }
+  const d=await r.json();
+  el("b-count").textContent=SEL.size+" tarjetas";
+  const dd=el("b-doors"); dd.innerHTML="";
+  let cur=null, box=null;
+  for(const x of d.doors){
+    if(x.serial!==cur){
+      cur=x.serial; box=document.createElement("div"); box.className="ctrl";
+      const h=document.createElement("h4"); h.textContent=x.ctrl_name+" · "+x.serial;
+      box.appendChild(h); dd.appendChild(box);
+    }
+    const row=document.createElement("div"); row.className="drow";
+    const nm=document.createElement("span"); nm.textContent=x.number+" · "+x.name;
+    const sel=document.createElement("select"); sel.dataset.oid=x.oid;
+    for(const o of [["__","Sin cambio"],["","Heredar del grupo"],["Y","Concede"],["N","Niega"]]){
+      const op=document.createElement("option"); op.value=o[0]; op.textContent=o[1]; sel.appendChild(op);
+    }
+    row.appendChild(nm); row.appendChild(sel); box.appendChild(row);
+  }
+  el("b-warn").textContent="";
+  el("bmodal").style.display="flex";
+};
+el("b-cancel").onclick=()=>{ el("bmodal").style.display="none"; };
+el("b-doors").onchange=()=>{
+  const n=[...el("b-doors").querySelectorAll("select")].filter(s=>s.value==="N").length;
+  el("b-warn").textContent = n ? "⚠ Vas a NEGAR "+n+" puerta(s) en "+SEL.size+" tarjetas." : "";
+};
+el("b-save").onclick=async()=>{
+  const set={};
+  el("b-doors").querySelectorAll("select").forEach(s=>{ if(s.value!=="__") set[s.dataset.oid]=s.value; });
+  if(!Object.keys(set).length){ alert("No cambiaste ninguna puerta."); return; }
+  if(!confirm("Aplicar a "+SEL.size+" tarjetas? Palmetto se escribe una por una y puede tardar.")) return;
+  el("b-save").disabled=true; el("b-warn").textContent="Aplicando…";
+  const r=await fetch(`${API}/bulk-card-doors`,{method:"POST",body:JSON.stringify({cards:[...SEL],set})});
+  const d=await r.json().catch(()=>({}));
+  el("b-save").disabled=false;
+  if(r.ok){
+    el("bmodal").style.display="none";
+    const fails=(d.results||[]).filter(x=>!x.ok).map(x=>x.card+": "+x.error);
+    alert("Aplicadas "+d.ok+" · fallaron "+d.failed+(fails.length?"\n"+fails.slice(0,10).join("\n"):""));
+  }else alert("Error: "+(d.error||r.status));
 };
 loadList();
 </script>

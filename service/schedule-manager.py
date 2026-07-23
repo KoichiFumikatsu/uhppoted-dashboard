@@ -605,6 +605,10 @@ def api_put_card_doors(card, body):
                 return 400, {'error': 'profile fuera de rango en ' + oid}
         clean[oid] = v
 
+    code, before = api_card_doors(card)
+    if code != 200:
+        return code, before
+
     ov = _card_overrides()
     if clean:
         ov[str(card)] = {'doors': clean, 'ts': _now_str()}
@@ -615,17 +619,48 @@ def api_put_card_doors(card, body):
     code, eff = api_card_doors(card)
     if code != 200:
         return code, eff
-    pdoors = {r['number']: r['value'] for r in eff['doors'] if r['serial'] == PALMETTO}
-    if pdoors:
+    pal = lambda m: {r['number']: r['value'] for r in m['doors'] if r['serial'] == PALMETTO}
+    pdoors = pal(eff)
+    dates_changed = ((body.get('from') or eff['from']) != eff['from']
+                     or (body.get('to') or eff['to']) != eff['to'])
+    # sin cambio efectivo en Palmetto no tiene sentido golpear el hardware (lotes grandes)
+    if pdoors and (pdoors != pal(before) or dates_changed):
         # from/to no tienen override: van al hardware pero el panel los repone al publicar
         c2, r2 = api_put_card(card, {'from': body.get('from') or eff['from'],
                                      'to': body.get('to') or eff['to'], 'doors': pdoors})
         if c2 != 200:
             return 500, {'error': 'override guardado pero fallo el push a Palmetto: %s'
                                   % r2.get('error', ''), 'saved': True}
+        applied = True
+    else:
+        applied = False
     teq = sorted({valid[o][0] for o in clean if valid[o][0] != PALMETTO})
-    return 200, {'ok': True, 'card': str(card), 'palmetto_applied': bool(pdoors),
+    return 200, {'ok': True, 'card': str(card), 'palmetto_applied': applied,
                  'pending_publish': teq}
+
+
+def api_bulk_card_doors(body):
+    """body: {cards:[...], set:{oid: 'Y'|'N'|''}}. '' limpia el override de esa puerta;
+    las puertas ausentes del 'set' no se tocan."""
+    cards = body.get('cards') or []
+    changes = body.get('set') or {}
+    if not cards:
+        return 400, {'error': 'sin tarjetas'}
+    if not changes:
+        return 400, {'error': 'sin cambios'}
+    results = []
+    for card in cards:
+        cur = dict((_card_overrides().get(str(card)) or {}).get('doors') or {})
+        for oid, v in changes.items():
+            if str(v) == '':
+                cur.pop(str(oid), None)
+            else:
+                cur[str(oid)] = str(v)
+        code, resp = api_put_card_doors(card, {'doors': cur})
+        results.append({'card': str(card), 'ok': code == 200,
+                        'error': None if code == 200 else resp.get('error')})
+    ok = sum(1 for r in results if r['ok'])
+    return 200, {'ok': ok, 'failed': len(results) - ok, 'results': results}
 
 
 def api_get_role_profiles():
@@ -1045,6 +1080,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         body = self._body()
         if p == '/api/bulk-assign':
             return self._write(p, 'POST', api_bulk_assign(body), body)
+        if p == '/api/bulk-card-doors':
+            return self._write(p, 'POST', api_bulk_card_doors(body), body)
         if p == '/api/publish':
             return self._write(p, 'POST', api_publish(body), body)
         if p == '/api/controllers-refresh':
