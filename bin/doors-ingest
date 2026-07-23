@@ -18,7 +18,7 @@ try:
     conn = sqlite3.connect(config.DB_PATH)
     db.init_db(conn)
     counts = ingest.run_once(
-        conn, config.EVENTS_JSON, config.TEQ_JSON,
+        conn, config.PALMETTO_JSON, config.TEQ_JSON,
         config.PALMETTO_SERIAL, config.TEQ_SERIALS, config.SINCE_DATE)
     conn.close()
     print("doors-ingest:", counts)

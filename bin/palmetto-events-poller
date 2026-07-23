@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Poller de eventos de Palmetto por el protocolo UDP directo (doors_analytics.uhppote_udp),
+sin depender del panel httpd ni de uhppote-cli. Trae event-type y direction completos.
+Mantiene /var/uhppoted/palmetto-events.json (eventos + cursor), mismo formato que consume
+collect_palmetto. Palmetto es LAN: rapido y fiable, sin warmup.
+
+Mismo metodo servira para Tequendama sobre Tailscale (cambiar host) o desde un edge box
+Linux local a las placas."""
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, "/root/uhppoted-dashboard")
+from doors_analytics.uhppote_udp import Controller
+
+SERIAL = 222451671
+HOST = "192.168.15.10"
+DEVICE_NAME = "Palmetto Controller"
+DOOR_NAMES = {1: "(P) Porteria", 2: "Puerta 2", 3: "Puerta 3", 4: "Puerta 4"}
+OUT = "/var/uhppoted/palmetto-events.json"
+MAXKEEP = 8000       # eventos retenidos en el archivo (el historico durable vive en doors.db)
+CAP = 500            # max eventos por ciclo (primer arranque no hace backfill gigante)
+PERIOD = 30
+
+
+def load():
+    if os.path.exists(OUT):
+        try:
+            d = json.load(open(OUT))
+            return d.get("events", []), d.get("cursor", {})
+        except (json.JSONDecodeError, OSError):
+            pass
+    return [], {}
+
+
+def save(events, cursor):
+    tmp = OUT + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"events": events[-MAXKEEP:], "cursor": cursor}, f)
+    os.replace(tmp, OUT)
+
+
+def to_record(ev):
+    return {
+        "device-id": SERIAL,
+        "device-name": DEVICE_NAME,
+        "index": ev["index"],
+        "timestamp": ev["timestamp"],
+        "card": ev["card"],
+        "door": ev["door"],
+        "door-name": DOOR_NAMES.get(ev["door"], "P%s" % ev["door"]),
+        "granted": ev["granted"],
+        "reason": ev["reason"],
+        "direction": ev["direction"],
+        "event-type": ev["event-type"],
+    }
+
+
+def cycle(ctrl, events, cursor):
+    last = ctrl.last_index()
+    if not last:
+        return events, cursor
+    prev = cursor.get(str(SERIAL))
+    # primer arranque: no backfillear todo el buffer, solo los ultimos CAP (el historico
+    # completo ya esta en doors.db desde la ingesta previa por events.json)
+    start = (last - CAP) if prev is None else prev
+    start = max(0, start)
+    got = 0
+    idx = start + 1
+    while idx <= last and got < CAP:
+        ev = ctrl.get_event(idx)
+        if ev:
+            events.append(to_record(ev))
+            got += 1
+        idx += 1
+    cursor[str(SERIAL)] = last
+    return events, cursor
+
+
+def main():
+    ctrl = Controller(SERIAL, HOST)
+    events, cursor = load()
+    while True:
+        try:
+            events, cursor = cycle(ctrl, events, cursor)
+            save(events, cursor)
+        except Exception as e:
+            print("palmetto-poller err:", e, flush=True)
+        time.sleep(PERIOD)
+
+
+if __name__ == "__main__":
+    main()
