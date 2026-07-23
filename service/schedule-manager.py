@@ -1000,7 +1000,8 @@ def api_put_role_profiles(body):
 
 def api_generate_tsv():
     tsv, header, n = generate_acl_tsv()
-    return 200, {'tsv': tsv, 'header': header, 'cards': n}
+    return 200, {'tsv': tsv, 'header': header, 'cards': n,
+                 'profiles_referenced': sorted(_profiles_referenced(tsv))}
 
 
 import re as _re
@@ -1049,6 +1050,71 @@ def _parse_loadacl(text):
     return m
 
 
+def _profiles_of(serial, conf=None):
+    """{id: perfil} leidos de una placa. None si no se pudo leer (no vacio: hay que
+    distinguir 'no tiene perfiles' de 'no contesto')."""
+    args = (['--config', str(conf)] if conf else []) + \
+           ['--timeout', '10s', 'get-time-profiles', str(serial)]
+    rc, out, err = _run(args, timeout=20)
+    if rc != 0 or 'Profile' not in out:
+        return None
+    found = {}
+    for line in out.splitlines():
+        p = _parse_profile_line(line.strip())
+        if p:
+            found[p['id']] = p
+    return found
+
+
+def _same_profile(a, b):
+    if not a or not b:
+        return False
+    return (a.get('from') == b.get('from') and a.get('to') == b.get('to')
+            and sorted(a.get('weekdays') or []) == sorted(b.get('weekdays') or [])
+            and [list(s) for s in (a.get('segments') or [])] ==
+                [list(s) for s in (b.get('segments') or [])]
+            and int(a.get('linked') or 0) == int(b.get('linked') or 0))
+
+
+def _profiles_referenced(tsv):
+    """Ids de perfil que aparecen en las celdas de puerta de un TSV."""
+    refs = set()
+    for line in tsv.splitlines()[1:]:
+        for cell in line.split('\t')[4:]:
+            cell = cell.strip()
+            if cell.isdigit():
+                refs.add(int(cell))
+    return refs
+
+
+def _check_profiles(serial, tsv, conf):
+    """El id de perfil viaja DENTRO de la celda del TSV, pero el perfil vive en cada
+    placa por separado: el mismo id puede ser otro horario. Sin esta guarda el publish
+    empuja una referencia rota o distinta sin decir nada. Devuelve None si esta ok."""
+    refs = _profiles_referenced(tsv)
+    if not refs:
+        return None
+    ref_defs = _profiles_of(CONTROLLER)          # Palmetto = definicion de referencia
+    if ref_defs is None:
+        return 'no se pudieron leer los horarios de referencia en %s' % CONTROLLER
+    faltan = sorted(r for r in refs if r not in ref_defs)
+    if faltan:
+        return 'los horarios %s no existen en %s' % (faltan, CONTROLLER)
+    if str(serial) == CONTROLLER:
+        return None
+    board = _profiles_of(serial, conf)
+    if board is None:
+        return 'no se pudieron leer los horarios de la placa para validarlos'
+    problemas = []
+    for r in sorted(refs):
+        if r not in board:
+            problemas.append('el horario %d no existe en esta placa' % r)
+        elif not _same_profile(board[r], ref_defs[r]):
+            problemas.append('el horario %d existe pero es distinto al de %s'
+                             % (r, CONTROLLER))
+    return '; '.join(problemas) if problemas else None
+
+
 def _load_one(serial):
     conf = _isolated_conf(serial)
     tsv, _h, _n = generate_acl_tsv(only_serial=serial)
@@ -1059,6 +1125,11 @@ def _load_one(serial):
     last = ''
     for attempt in range(1, retries + 1):
         _warmup_ctrl(serial, conf)
+        if attempt == 1:
+            problema = _check_profiles(serial, tsv, conf)
+            if problema:
+                return {'ok': False, 'attempts': 0,
+                        'error': 'no se publico por seguridad: ' + problema}
         rc, out, err = _run(['--config', str(conf), '--bind', '0.0.0.0:0',
                             '--timeout', '20s', 'load-acl', '--with-pin', str(tsvpath)],
                             timeout=300)

@@ -110,7 +110,10 @@ el("preview").onclick=async()=>{
   const lines=tsv.split("\n");
   p.textContent=lines.slice(0,60).join("\n")+(lines.length>60?("\n… "+(lines.length-60)+" filas más"):"");
   p.style.display="block";
-  el("msg").className="msg"; el("msg").textContent=(d.cards!=null?d.cards+" tarjetas · ":"")+lines.length+" líneas";
+  const refs=d.profiles_referenced||[];
+  el("msg").className=refs.length?"msg warn":"msg";
+  el("msg").textContent=(d.cards!=null?d.cards+" tarjetas · ":"")+lines.length+" líneas"+
+    (refs.length?(" · usa los horarios "+refs.join(", ")+": se validan contra cada placa antes de escribir, y si difieren esa placa no se publica"):"");
 };
 poll();
 </script>
